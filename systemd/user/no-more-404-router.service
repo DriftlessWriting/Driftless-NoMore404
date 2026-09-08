@@ -1,0 +1,25 @@
+[Unit]
+Description=Driftless-NoMore404 on-demand llama.cpp router
+Documentation=https://github.com/DriftlessWriting/Driftless-NoMore404
+PartOf=no-more-404.target
+BindsTo=no-more-404.target
+After=graphical-session.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%E/no-more-404/runtime.env
+ExecStart=%h/.local/libexec/no-more-404/no-more-404-router
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=64 66 78
+TimeoutStopSec=120
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+UMask=0077
+
+# This service is intentionally started through no-more-404.target rather
+# than enabled at login. The lightweight router holds no model VRAM until use.

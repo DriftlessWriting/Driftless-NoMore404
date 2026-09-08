@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+# Optional Hermes Desktop session adapter.
+#
+# This program is invoked by an existing, user-controlled Hermes desktop
+# entry. It does not enable or schedule Hermes. It starts the configured local
+# runtime target alongside that invocation, validates an explicitly configured
+# Electron sandbox helper, and stops a runtime it started when Hermes exits.
+
+readonly TARGET_UNIT="${NO_MORE_404_TARGET_UNIT:-no-more-404.target}"
+readonly HERMES_BIN="${HERMES_DESKTOP_BIN:-}"
+readonly HERMES_WORKDIR="${HERMES_DESKTOP_WORKDIR:-}"
+readonly SANDBOX_PATH="${HERMES_ELECTRON_SANDBOX:-}"
+readonly REQUIRE_RUNTIME="${NO_MORE_404_REQUIRE_RUNTIME:-true}"
+
+runtime_owned=false
+child_pid=''
+received_signal=''
+session_lock_fd=''
+
+log() {
+  printf 'no-more-404-hermes-session: %s\n' "$*" >&2
+  if command -v logger >/dev/null 2>&1; then
+    logger -t no-more-404-hermes-session -- "$*" || true
+  fi
+}
+
+fail() {
+  log "$*"
+  exit 1
+}
+
+require_boolean() {
+  local name="$1"
+  local value="$2"
+  case "$value" in
+    true | false) ;;
+    *) fail "$name must be true or false" ;;
+  esac
+}
+
+validate_sandbox() {
+  local sandbox_stat
+
+  [[ "$SANDBOX_PATH" == /* ]] ||
+    fail "HERMES_ELECTRON_SANDBOX must be an absolute path"
+  [[ ! -L "$SANDBOX_PATH" ]] ||
+    fail "Electron sandbox helper is a symbolic link and is rejected: $SANDBOX_PATH"
+  [[ -f "$SANDBOX_PATH" ]] ||
+    fail "Electron sandbox helper is missing: $SANDBOX_PATH"
+
+  sandbox_stat="$(stat -Lc '%u:%g:%a' -- "$SANDBOX_PATH" 2>/dev/null || true)"
+  [[ "$sandbox_stat" == 0:0:4755 ]] ||
+    fail "Electron sandbox helper must be a root:root regular file with mode 4755 (found ${sandbox_stat:-unknown})"
+}
+
+acquire_session_lock() {
+  local session_lock_file
+
+  [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -O "$XDG_RUNTIME_DIR" ]] ||
+    fail "XDG_RUNTIME_DIR must be an existing directory owned by the current user"
+
+  session_lock_file="$XDG_RUNTIME_DIR/no-more-404-session.lock"
+  exec {session_lock_fd}>"$session_lock_file"
+  flock --nonblock "$session_lock_fd"
+}
+
+release_session_lock() {
+  [[ -n "$session_lock_fd" ]] || return 0
+  flock --unlock "$session_lock_fd" 2>/dev/null || true
+  exec {session_lock_fd}>&-
+  session_lock_fd=''
+}
+
+cleanup() {
+  local cleanup_status=$?
+  trap - EXIT INT TERM HUP
+
+  if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
+    kill -TERM "$child_pid" 2>/dev/null || true
+    for _ in {1..50}; do
+      kill -0 "$child_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+  fi
+
+  if [[ "$runtime_owned" == true ]]; then
+    systemctl --user stop "$TARGET_UNIT" >/dev/null 2>&1 ||
+      log "failed to stop runtime target after Hermes exited: $TARGET_UNIT"
+  fi
+  release_session_lock
+  return "$cleanup_status"
+}
+
+forward_signal() {
+  local signal="$1"
+  received_signal="$signal"
+  [[ -n "$child_pid" ]] && kill -s "$signal" "$child_pid" 2>/dev/null || true
+}
+
+main() {
+  local command_status=0
+
+  require_boolean NO_MORE_404_REQUIRE_RUNTIME "$REQUIRE_RUNTIME"
+
+  command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
+  command -v stat >/dev/null 2>&1 || fail "stat is required"
+  command -v flock >/dev/null 2>&1 || fail "flock is required"
+  systemctl --user show-environment >/dev/null 2>&1 ||
+    fail "the systemd user manager is unavailable in this session"
+
+  [[ "$TARGET_UNIT" =~ ^[A-Za-z0-9_.@:-]+\.target$ ]] ||
+    fail "NO_MORE_404_TARGET_UNIT must name one systemd target"
+  [[ "$HERMES_BIN" == /* && -f "$HERMES_BIN" && -x "$HERMES_BIN" ]] ||
+    fail "HERMES_DESKTOP_BIN must name an executable absolute path"
+  [[ "$HERMES_WORKDIR" == /* && -d "$HERMES_WORKDIR" ]] ||
+    fail "HERMES_DESKTOP_WORKDIR must name an absolute directory"
+  validate_sandbox
+
+  trap cleanup EXIT
+  trap 'forward_signal INT' INT
+  trap 'forward_signal TERM' TERM
+  trap 'forward_signal HUP' HUP
+
+  if ! acquire_session_lock; then
+    release_session_lock
+    if [[ "$REQUIRE_RUNTIME" == true ]]; then
+      fail "another lifecycle operation or owning session is active; Hermes launch is refused to preserve runtime ownership"
+    fi
+    log "another lifecycle operation or owning session is active; continuing without local-model lifecycle ownership"
+  elif systemctl --user is-active --quiet "$TARGET_UNIT"; then
+    # A separately started target is persistent and not owned by this session.
+    release_session_lock
+  else
+    # Mark ownership before starting so cleanup also covers a partially
+    # successful systemd transaction. Keep the lock until Hermes exits so a
+    # concurrent persistent start cannot be mistaken for this session's start.
+    runtime_owned=true
+    if ! systemctl --user start "$TARGET_UNIT"; then
+      if [[ "$REQUIRE_RUNTIME" == true ]]; then
+        fail "failed to start required runtime target: $TARGET_UNIT"
+      fi
+      log "failed to start $TARGET_UNIT; continuing without local-model helpers"
+    fi
+  fi
+
+  unset ELECTRON_DISABLE_SANDBOX
+  export CHROME_DEVEL_SANDBOX="$SANDBOX_PATH"
+
+  cd -- "$HERMES_WORKDIR"
+  log "starting Hermes with runtime target $TARGET_UNIT"
+  (
+    # Do not let Hermes or detached descendants inherit the ownership lock.
+    [[ -z "$session_lock_fd" ]] || exec {session_lock_fd}>&-
+    exec "$HERMES_BIN" "$@"
+  ) &
+  child_pid=$!
+
+  while true; do
+    if wait "$child_pid"; then
+      command_status=0
+      child_pid=''
+      break
+    else
+      command_status=$?
+      if ! kill -0 "$child_pid" 2>/dev/null; then
+        child_pid=''
+        break
+      fi
+      [[ -z "$received_signal" ]] && continue
+      exit "$command_status"
+    fi
+  done
+
+  child_pid=''
+  exit "$command_status"
+}
+
+main "$@"

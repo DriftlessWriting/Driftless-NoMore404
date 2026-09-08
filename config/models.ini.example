@@ -1,0 +1,20 @@
+version = 1
+
+# Shared defaults for automatic, model-neutral hardware fitting. Guided setup
+# replaces ctx-size = 0 with the largest context llama.cpp can fit for the
+# chosen model and machine, never accepting less than Hermes's 64K minimum.
+[*]
+ctx-size = 0
+parallel = 1
+fit = on
+fit-target = 1024
+fit-ctx = 64000
+flash-attn = auto
+jinja = true
+cache-prompt = true
+
+# Replace these paths before starting the service. Models are never bundled.
+[local-main]
+model = /absolute/path/to/main-model.gguf
+load-on-startup = false
+stop-timeout = 90

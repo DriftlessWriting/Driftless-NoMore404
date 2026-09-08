@@ -1,0 +1,9 @@
+[Unit]
+Description=Driftless-NoMore404 local model runtime
+Documentation=https://github.com/DriftlessWriting/Driftless-NoMore404
+Wants=no-more-404-router.service
+After=no-more-404-router.service
+
+# The health watchdog rides with the runtime: it is pulled in when the target
+# starts and removed when it stops, so a stopped runtime is never watched.
+Wants=no-more-404-watch.timer

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+readonly EX_NOINPUT=66
+readonly EX_CONFIG=78
+
+fail() {
+  local exit_code="$1"
+  shift
+  printf 'no-more-404-router: %s\n' "$*" >&2
+  exit "$exit_code"
+}
+
+require_absolute_file() {
+  local variable_name="$1"
+  local value="$2"
+
+  [[ "$value" == /* ]] || fail "$EX_CONFIG" "$variable_name must be an absolute path"
+  [[ -f "$value" ]] || fail "$EX_NOINPUT" "$variable_name does not exist"
+  [[ -r "$value" ]] || fail "$EX_NOINPUT" "$variable_name is not readable"
+}
+
+require_positive_integer() {
+  local variable_name="$1"
+  local value="$2"
+
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "$EX_CONFIG" "$variable_name must be a positive integer"
+  (( value > 0 )) || fail "$EX_CONFIG" "$variable_name must be greater than zero"
+}
+
+: "${LLAMA_SERVER_BIN:=}"
+: "${MODELS_PRESET:=}"
+: "${BIND_HOST:=127.0.0.1}"
+: "${PORT:=55984}"
+: "${MAX_MODELS:=1}"
+: "${IDLE_SECONDS:=60}"
+: "${REQUEST_TIMEOUT_SECONDS:=1800}"
+: "${ENABLE_METRICS:=false}"
+: "${ENABLE_SLOTS:=false}"
+: "${LLAMA_CACHE_DIR:=${XDG_CACHE_HOME:-$HOME/.cache}/no-more-404}"
+
+[[ -n "$LLAMA_SERVER_BIN" ]] || fail "$EX_CONFIG" "LLAMA_SERVER_BIN is not configured"
+[[ -n "$MODELS_PRESET" ]] || fail "$EX_CONFIG" "MODELS_PRESET is not configured"
+
+require_absolute_file LLAMA_SERVER_BIN "$LLAMA_SERVER_BIN"
+[[ -x "$LLAMA_SERVER_BIN" ]] || fail "$EX_NOINPUT" "LLAMA_SERVER_BIN is not executable"
+require_absolute_file MODELS_PRESET "$MODELS_PRESET"
+
+case "$BIND_HOST" in
+  127.0.0.1 | ::1) ;;
+  *) fail "$EX_CONFIG" "BIND_HOST must be an explicit loopback address (127.0.0.1 or ::1)" ;;
+esac
+
+require_positive_integer PORT "$PORT"
+(( PORT >= 1024 && PORT <= 65535 )) || fail "$EX_CONFIG" "PORT must be between 1024 and 65535"
+require_positive_integer MAX_MODELS "$MAX_MODELS"
+require_positive_integer IDLE_SECONDS "$IDLE_SECONDS"
+require_positive_integer REQUEST_TIMEOUT_SECONDS "$REQUEST_TIMEOUT_SECONDS"
+
+case "$ENABLE_METRICS" in true | false) ;; *) fail "$EX_CONFIG" "ENABLE_METRICS must be true or false" ;; esac
+case "$ENABLE_SLOTS" in true | false) ;; *) fail "$EX_CONFIG" "ENABLE_SLOTS must be true or false" ;; esac
+
+[[ "$LLAMA_CACHE_DIR" == /* ]] || fail "$EX_CONFIG" "LLAMA_CACHE_DIR must be an absolute path"
+install -d -m 0700 "$LLAMA_CACHE_DIR"
+export LLAMA_CACHE="$LLAMA_CACHE_DIR"
+
+if grep -Eiq '(@MODEL_DIR@|/absolute/path/to)' "$MODELS_PRESET"; then
+  fail "$EX_CONFIG" "MODELS_PRESET still contains example placeholders"
+fi
+
+if grep -Eiq '^[[:space:]]*load-on-startup[[:space:]]*=[[:space:]]*true([[:space:]]*|$)' "$MODELS_PRESET"; then
+  fail "$EX_CONFIG" "preloading is disabled in this safety-focused release; set every load-on-startup value to false"
+fi
+
+help_output="$("$LLAMA_SERVER_BIN" --help 2>&1 || true)"
+required_flags=(
+  --models-preset
+  --models-max
+  --models-autoload
+  --sleep-idle-seconds
+  --fit
+  --fit-target
+  --fit-ctx
+  --parallel
+  --flash-attn
+  --jinja
+  --cache-prompt
+  --host
+  --port
+  --timeout
+  --no-webui
+)
+[[ "$ENABLE_METRICS" == true ]] && required_flags+=(--metrics)
+if [[ "$ENABLE_SLOTS" == true ]]; then
+  required_flags+=(--slots)
+else
+  required_flags+=(--no-slots)
+fi
+for required_flag in "${required_flags[@]}"; do
+  grep -Fq -- "$required_flag" <<<"$help_output" ||
+    fail "$EX_CONFIG" "LLAMA_SERVER_BIN does not support required flag $required_flag; use the pinned or a compatible llama.cpp release"
+done
+
+args=(
+  --models-preset "$MODELS_PRESET"
+  --models-max "$MAX_MODELS"
+  --models-autoload
+  --sleep-idle-seconds "$IDLE_SECONDS"
+  --host "$BIND_HOST"
+  --port "$PORT"
+  --timeout "$REQUEST_TIMEOUT_SECONDS"
+  --no-webui
+)
+
+[[ "$ENABLE_METRICS" == true ]] && args+=(--metrics)
+if [[ "$ENABLE_SLOTS" == true ]]; then
+  args+=(--slots)
+else
+  args+=(--no-slots)
+fi
+
+exec "$LLAMA_SERVER_BIN" "${args[@]}"

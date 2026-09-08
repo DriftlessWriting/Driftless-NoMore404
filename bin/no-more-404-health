@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+# Bounded hang detection for Driftless-NoMore404.
+#
+# This watchdog runs from a systemd timer while the runtime is active. It
+# probes the router's health endpoint and restarts the runtime only after a
+# configurable number of consecutive failed checks. A stopped runtime remains
+# stopped; an active target with no router fails visibly but is not restarted.
+# Starting the runtime is always the operator's (or the CLI's) decision, never
+# the watchdog's.
+
+readonly TARGET_UNIT="${NO_MORE_404_TARGET_UNIT:-no-more-404.target}"
+readonly ROUTER_UNIT="${NO_MORE_404_ROUTER_UNIT:-no-more-404-router.service}"
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/no-more-404"
+readonly CONFIG_FILE="${NO_MORE_404_CONFIG_FILE:-$CONFIG_DIR/runtime.env}"
+readonly STATE_DIR="${NO_MORE_404_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/no-more-404}"
+readonly COUNTER_FILE="${NO_MORE_404_COUNTER_FILE:-$STATE_DIR/health-failures}"
+readonly HEALTH_CURL_TIMEOUT_SECONDS="${NO_MORE_404_HEALTH_CURL_TIMEOUT_SECONDS:-5}"
+
+trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+config_value() {
+  local key="$1"
+  local default_value="$2"
+  local line value
+
+  if [[ ! -r "$CONFIG_FILE" ]]; then
+    printf '%s' "$default_value"
+    return
+  fi
+
+  line="$(awk -v wanted="$key" '
+    /^[[:space:]]*#/ { next }
+    {
+      candidate = $0
+      sub(/^[[:space:]]*/, "", candidate)
+      separator = index(candidate, "=")
+      if (separator == 0) { next }
+      candidate_key = substr(candidate, 1, separator - 1)
+      sub(/[[:space:]]+$/, "", candidate_key)
+      if (candidate_key == wanted) { found = candidate }
+    }
+    END { if (found != "") print found }
+  ' "$CONFIG_FILE")"
+
+  if [[ -z "$line" ]]; then
+    printf '%s' "$default_value"
+    return
+  fi
+
+  value="$(trim_whitespace "${line#*=}")"
+  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  printf '%s' "$value"
+}
+
+health_url() {
+  local host port
+  host="${NO_MORE_404_BIND_HOST:-$(config_value BIND_HOST 127.0.0.1)}"
+  port="${NO_MORE_404_PORT:-$(config_value PORT 55984)}"
+  case "$host" in
+    127.0.0.1) ;;
+    ::1) host='[::1]' ;;
+    *) return 1 ;;
+  esac
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1024 || port > 65535 )); then
+    return 1
+  fi
+  printf 'http://%s:%s/health' "$host" "$port"
+}
+
+failures_required() {
+  local required
+  required="${NO_MORE_404_HEALTH_FAILURES_REQUIRED:-$(config_value HEALTH_FAILURES_REQUIRED 2)}"
+  if [[ ! "$required" =~ ^[0-9]+$ ]] || (( required < 2 )); then
+    printf 'invalid HEALTH_FAILURES_REQUIRED; using safe default 2\n' >&2
+    required=2
+  fi
+  printf '%s' "$required"
+}
+
+read_counter() {
+  local value='0'
+  [[ -f "$COUNTER_FILE" ]] && value="$(<"$COUNTER_FILE")"
+  [[ "$value" =~ ^[0-9]+$ ]] || value='0'
+  printf '%s' "$value"
+}
+
+write_counter() {
+  local value="$1"
+  local tmp
+  install -d -m 0700 "$STATE_DIR"
+  tmp="$(mktemp "$STATE_DIR/.health-failures.XXXXXX")"
+  printf '%s\n' "$value" >"$tmp"
+  mv -f -- "$tmp" "$COUNTER_FILE"
+}
+
+main() {
+  # The watchdog must never take down or replace a runtime it cannot verify.
+  command -v curl >/dev/null 2>&1 || {
+    printf 'health watchdog cannot run: curl is unavailable\n' >&2
+    return 1
+  }
+  command -v systemctl >/dev/null 2>&1 || {
+    printf 'health watchdog cannot run: systemctl is unavailable\n' >&2
+    return 1
+  }
+  [[ "$HEALTH_CURL_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] &&
+    (( HEALTH_CURL_TIMEOUT_SECONDS > 0 && HEALTH_CURL_TIMEOUT_SECONDS <= 60 )) || {
+    printf 'health watchdog cannot run: timeout must be between 1 and 60 seconds\n' >&2
+    return 1
+  }
+
+  if ! systemctl --user is-active --quiet "$TARGET_UNIT" 2>/dev/null; then
+    write_counter 0
+    return 0
+  fi
+
+  if ! systemctl --user is-active --quiet "$ROUTER_UNIT" 2>/dev/null; then
+    # An inactive target is an intentional stop, but an active target without
+    # its router is a broken runtime (for example after the restart limit is
+    # exhausted). Keep deliberate non-restart exits bounded while making the
+    # failure visible to systemd and the journal.
+    write_counter 0
+    printf 'router service %s is inactive while runtime target %s is active; inspect its systemd status\n' \
+      "$ROUTER_UNIT" "$TARGET_UNIT" >&2
+    return 1
+  fi
+
+  local url
+  url="$(health_url)" || {
+    printf 'health watchdog cannot run: endpoint configuration is invalid\n' >&2
+    return 1
+  }
+
+  if curl --disable --noproxy '*' --fail --silent --show-error \
+    --max-time "$HEALTH_CURL_TIMEOUT_SECONDS" "$url" >/dev/null; then
+    write_counter 0
+    return 0
+  fi
+
+  local required count
+  required="$(failures_required)"
+  count=$(( $(read_counter) + 1 ))
+  write_counter "$count"
+
+  printf 'router health check failed (%d/%d)\n' "$count" "$required"
+
+  if (( count < required )); then
+    return 0
+  fi
+
+  printf 'router failed %d consecutive health checks; restarting %s\n' \
+    "$count" "$TARGET_UNIT"
+  if systemctl --user restart "$TARGET_UNIT"; then
+    write_counter 0
+  else
+    printf 'failed to restart %s; the failure count remains at %d\n' \
+      "$TARGET_UNIT" "$count" >&2
+    return 1
+  fi
+}
+
+main

@@ -1,0 +1,18 @@
+repository=https://github.com/ggml-org/llama.cpp.git
+release=b10859
+commit=ca86fb222e0080d4d102f4390d5c7279dffb3277
+required_runtime_executable=llama-server
+required_setup_preflight=llama-fit-params
+asset_vulkan_x64=llama-b10859-bin-ubuntu-vulkan-x64.tar.gz
+sha256_vulkan_x64=388320dbb6ca8dfaf9c8b90ee28e8be777f51ea58d22b7d6e21019831dc9e2ad
+asset_cpu_x64=llama-b10859-bin-ubuntu-x64.tar.gz
+sha256_cpu_x64=e8a0262106a8281c17deb5abc26b4ffc316e8f3311a633ad85b5bb38940ee62e
+asset_vulkan_arm64=llama-b10859-bin-ubuntu-vulkan-arm64.tar.gz
+sha256_vulkan_arm64=9d77369c7de730acfb6d09201e2d5a9617e6d46e530fcd315de8e8ce2466a46e
+asset_cpu_arm64=llama-b10859-bin-ubuntu-arm64.tar.gz
+sha256_cpu_arm64=dbf5521555e3bebba0ba4ea91800cfef8eddd8480158ccad1750282879422b1c
+tested_at=2026-09-08
+
+# Driftless-NoMore404 does not vendor llama.cpp source, binaries, or models.
+# This lock records the official release used for compatibility testing and the
+# exact assets that the explicit install-runtime path is allowed to download.

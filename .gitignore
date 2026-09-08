@@ -1,0 +1,55 @@
+# Local runtime configuration
+runtime.env
+models.ini
+*.env
+!.env.example
+!*.env.example
+
+# Models and generated inference artifacts
+*.gguf
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.bin
+models/
+cache/
+build*/
+
+# Logs, state, databases, and credentials
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.token
+logs/
+state/
+secrets/
+.env
+.env.*
+!.env.example
+
+# Language and editor output
+__pycache__/
+*.py[cod]
+node_modules/
+.venv/
+venv/
+.idea/
+.vscode/
+*.swp
+*~
+
+# Packaging and local test output
+dist/
+coverage/
+tmp/
+*.tar
+*.tar.gz
+*.zip
+
+# Nested repositories and OS metadata
+.DS_Store
+Thumbs.db

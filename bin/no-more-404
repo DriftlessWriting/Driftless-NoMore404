@@ -1,0 +1,1725 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+readonly TARGET_UNIT=no-more-404.target
+readonly ROUTER_UNIT=no-more-404-router.service
+readonly WATCH_SERVICE_UNIT=no-more-404-watch.service
+readonly WATCH_TIMER_UNIT=no-more-404-watch.timer
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/no-more-404"
+readonly CONFIG_FILE="$CONFIG_DIR/runtime.env"
+readonly MODEL_FILE="$CONFIG_DIR/models.ini"
+readonly UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+readonly HERMES_PROVIDER_KEY=no-more-404
+readonly HERMES_PROVIDER_NAME='NoMore404 Local'
+readonly HERMES_MIN_CONTEXT_LENGTH=64000
+readonly AUTO_FIT_MARGIN_MIB=1024
+readonly MEMORY_PREFLIGHT_TIMEOUT_SECONDS=120
+readonly MODEL_PROBE_TIMEOUT_SECONDS=600
+readonly LLAMA_CPP_RELEASE=b10859
+readonly LLAMA_CPP_RELEASE_BASE_URL="https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_CPP_RELEASE"
+session_lock_fd=''
+setup_probe_pid=''
+setup_probe_status=''
+setup_effective_context=''
+setup_temporary_files=()
+setup_temporary_directories=()
+runtime_asset_name=''
+runtime_asset_sha256=''
+provisioned_binary=''
+
+fail() {
+  printf 'no-more-404: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: no-more-404 COMMAND [ARGS]
+
+Commands:
+  start                 Start the local-model router and wait for readiness.
+  stop                  Stop the router and all of its model workers.
+  restart               Restart the router and wait for readiness.
+  status                Show target and router service status.
+  logs                  Follow router and watchdog logs.
+  setup                 Auto-fit one chosen model and configure it safely.
+  install-runtime       Install the verified pinned llama.cpp Linux runtime.
+  register-hermes       Add configured models to the Hermes model picker.
+  doctor                Validate configuration without loading a model.
+  endpoint              Print the configured OpenAI-compatible base URL.
+  run -- COMMAND ...    Run a foreground command while the router is available.
+  help                  Show this help.
+
+The run command stops the runtime afterward only when it started the runtime.
+Start and restart refuse to race an active owning session's lifecycle decision.
+EOF
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "required command is missing: $1"
+}
+
+require_user_systemd() {
+  require_command systemctl
+  systemctl --user show-environment >/dev/null 2>&1 ||
+    fail "the systemd user manager is unavailable in this session"
+}
+
+stop_setup_probe() {
+  local attempt
+
+  [[ "$setup_probe_pid" =~ ^[0-9]+$ ]] || return 0
+  if kill -0 "$setup_probe_pid" 2>/dev/null; then
+    kill -TERM "$setup_probe_pid" 2>/dev/null || true
+    for ((attempt = 0; attempt < 100; attempt++)); do
+      kill -0 "$setup_probe_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL "$setup_probe_pid" 2>/dev/null || true
+  fi
+  if wait "$setup_probe_pid" 2>/dev/null; then
+    setup_probe_status=0
+  else
+    setup_probe_status=$?
+  fi
+  setup_probe_pid=''
+}
+
+cleanup_setup_artifacts() {
+  stop_setup_probe
+  if (( ${#setup_temporary_files[@]} > 0 )); then
+    rm -f -- "${setup_temporary_files[@]}"
+  fi
+  if (( ${#setup_temporary_directories[@]} > 0 )); then
+    rm -rf -- "${setup_temporary_directories[@]}"
+  fi
+  setup_temporary_files=()
+  setup_temporary_directories=()
+}
+
+select_runtime_asset() {
+  local flavor="$1"
+  local architecture="$2"
+
+  runtime_asset_name=''
+  runtime_asset_sha256=''
+  case "$flavor:$architecture" in
+    vulkan:x64)
+      runtime_asset_name="llama-$LLAMA_CPP_RELEASE-bin-ubuntu-vulkan-x64.tar.gz"
+      runtime_asset_sha256=388320dbb6ca8dfaf9c8b90ee28e8be777f51ea58d22b7d6e21019831dc9e2ad
+      ;;
+    cpu:x64)
+      runtime_asset_name="llama-$LLAMA_CPP_RELEASE-bin-ubuntu-x64.tar.gz"
+      runtime_asset_sha256=e8a0262106a8281c17deb5abc26b4ffc316e8f3311a633ad85b5bb38940ee62e
+      ;;
+    vulkan:arm64)
+      runtime_asset_name="llama-$LLAMA_CPP_RELEASE-bin-ubuntu-vulkan-arm64.tar.gz"
+      runtime_asset_sha256=9d77369c7de730acfb6d09201e2d5a9617e6d46e530fcd315de8e8ce2466a46e
+      ;;
+    cpu:arm64)
+      runtime_asset_name="llama-$LLAMA_CPP_RELEASE-bin-ubuntu-arm64.tar.gz"
+      runtime_asset_sha256=dbf5521555e3bebba0ba4ea91800cfef8eddd8480158ccad1750282879422b1c
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+install_runtime_flavor() {
+  local flavor="$1"
+  local architecture="$2"
+  local runtime_root="$3"
+  local destination staging_directory archive_path payload_directory
+  local actual_sha help_output archive_entry link_path resolved_link fit_binary missing_fit_flags
+
+  select_runtime_asset "$flavor" "$architecture" || return 1
+  destination="$runtime_root/$LLAMA_CPP_RELEASE-$flavor-$architecture"
+  if [[ -e "$destination" ]]; then
+    [[ -d "$destination" && ! -L "$destination" ]] ||
+      fail "refusing unsafe existing runtime path: $destination"
+    [[ -f "$destination/llama-server" && ! -L "$destination/llama-server" &&
+      -x "$destination/llama-server" ]] ||
+      fail "existing pinned runtime is incomplete: $destination"
+    fit_binary="$destination/llama-fit-params"
+    [[ -f "$fit_binary" && ! -L "$fit_binary" && -x "$fit_binary" ]] ||
+      fail "existing pinned runtime is incomplete: $destination"
+    if ! help_output="$("$destination/llama-server" --help 2>&1)"; then
+      show_runtime_start_failure "$flavor" "$help_output"
+      return 1
+    fi
+    grep -Fq -- --fit-ctx <<<"$help_output" ||
+      fail "existing pinned runtime failed its compatibility check: $destination"
+    missing_fit_flags="$(llama_fit_params_missing_flags "$fit_binary")"
+    [[ -z "$missing_fit_flags" ]] ||
+      fail "existing pinned runtime has an incompatible llama-fit-params companion: $missing_fit_flags"
+    provisioned_binary="$destination/llama-server"
+    printf 'Using the already installed pinned llama.cpp runtime: %s\n' "$provisioned_binary"
+    return 0
+  fi
+
+  staging_directory="$(mktemp -d "$runtime_root/.runtime-install.XXXXXX")"
+  setup_temporary_directories+=("$staging_directory")
+  archive_path="$staging_directory/$runtime_asset_name"
+  payload_directory="$staging_directory/payload"
+
+  printf 'Downloading official llama.cpp %s (%s %s)...\n' \
+    "$LLAMA_CPP_RELEASE" "$architecture" "$flavor"
+  if ! curl \
+    --disable \
+    --proto '=https' \
+    --tlsv1.2 \
+    --fail \
+    --silent \
+    --show-error \
+    --location \
+    --connect-timeout 15 \
+    --max-time 900 \
+    --output "$archive_path" \
+    "$LLAMA_CPP_RELEASE_BASE_URL/$runtime_asset_name"; then
+    printf 'Could not download the %s runtime.\n' "$flavor" >&2
+    return 1
+  fi
+
+  actual_sha="$(sha256sum "$archive_path" | awk '{ print $1 }')"
+  [[ "$actual_sha" == "$runtime_asset_sha256" ]] ||
+    fail "downloaded llama.cpp archive failed SHA-256 verification"
+
+  while IFS= read -r archive_entry; do
+    [[ "$archive_entry" == "llama-$LLAMA_CPP_RELEASE/"* ]] ||
+      fail "downloaded llama.cpp archive contains an unexpected path"
+    [[ "$archive_entry" != *'/../'* && "$archive_entry" != *'/..' ]] ||
+      fail "downloaded llama.cpp archive contains a traversal path"
+  done < <(tar --list --gzip --file "$archive_path")
+
+  install -d -m 0700 "$payload_directory"
+  tar \
+    --extract \
+    --gzip \
+    --file "$archive_path" \
+    --directory "$payload_directory" \
+    --strip-components=1 \
+    --no-same-owner \
+    --no-same-permissions
+  [[ -f "$payload_directory/llama-server" && ! -L "$payload_directory/llama-server" ]] ||
+    fail "downloaded llama.cpp archive does not contain a safe llama-server executable"
+  [[ -f "$payload_directory/llama-fit-params" && ! -L "$payload_directory/llama-fit-params" ]] ||
+    fail "downloaded llama.cpp archive does not contain a safe llama-fit-params executable"
+  [[ -f "$payload_directory/LICENSE" && ! -L "$payload_directory/LICENSE" ]] ||
+    fail "downloaded llama.cpp archive does not contain its license"
+  while IFS= read -r -d '' link_path; do
+    resolved_link="$(realpath -e -- "$link_path" 2>/dev/null || true)"
+    [[ -n "$resolved_link" && "$resolved_link" == "$payload_directory/"* ]] ||
+      fail "downloaded llama.cpp archive contains an unsafe symbolic link"
+  done < <(find "$payload_directory" -type l -print0)
+  chmod 0700 "$payload_directory/llama-server" "$payload_directory/llama-fit-params"
+
+  if ! help_output="$("$payload_directory/llama-server" --help 2>&1)"; then
+    show_runtime_start_failure "$flavor" "$help_output"
+    return 1
+  fi
+  if ! grep -Fq -- --fit-ctx <<<"$help_output"; then
+    printf 'The %s runtime could not start compatibly on this Linux installation.\n' \
+      "$flavor" >&2
+    return 1
+  fi
+  missing_fit_flags="$(llama_fit_params_missing_flags "$payload_directory/llama-fit-params")"
+  if [[ -n "$missing_fit_flags" ]]; then
+    printf 'The %s runtime has an incompatible llama-fit-params companion: %s\n' \
+      "$flavor" "$missing_fit_flags" >&2
+    return 1
+  fi
+
+  mv -- "$payload_directory" "$destination"
+  provisioned_binary="$destination/llama-server"
+  printf 'Installed the verified official llama.cpp runtime at %s\n' "$provisioned_binary"
+}
+
+show_runtime_start_failure() {
+  local flavor="$1"
+  local help_output="$2"
+  local os_family=''
+
+  printf 'The %s runtime could not start on this Linux installation.\n' "$flavor" >&2
+  if [[ -n "$help_output" ]]; then
+    printf 'llama-server reported:\n' >&2
+    printf '%s\n' "$help_output" | tail -n 6 >&2
+  fi
+
+  grep -Fq 'error while loading shared libraries:' <<<"$help_output" || return 0
+  if [[ -r /etc/os-release ]]; then
+    os_family="$(
+      awk -F= '
+        $1 == "ID" || $1 == "ID_LIKE" {
+          value = tolower($2)
+          gsub(/["\047]/, "", value)
+          printf "%s ", value
+        }
+      ' /etc/os-release
+    )"
+  fi
+
+  printf 'Install the ordinary runtime libraries for your distribution, then run setup again.\n' >&2
+  case " $os_family " in
+    *' debian '* | *' ubuntu '*)
+      printf 'For Debian/Ubuntu-family systems:\n' >&2
+      printf '  sudo apt update && sudo apt install --yes libgomp1 libssl3 zlib1g libbrotli1 libzstd1\n' >&2
+      ;;
+    *' fedora '* | *' rhel '*)
+      printf 'For Fedora/RHEL-family systems:\n' >&2
+      printf '  sudo dnf install --assumeyes libgomp openssl-libs zlib brotli libzstd libstdc++\n' >&2
+      ;;
+    *' arch '*)
+      printf 'For Arch-family systems:\n' >&2
+      printf '  sudo pacman --sync --needed gcc-libs openssl zlib brotli zstd\n' >&2
+      ;;
+    *)
+      printf 'See the runtime-dependency section in the NoMore404 Quickstart.\n' >&2
+      ;;
+  esac
+}
+
+install_pinned_runtime() {
+  local machine_architecture architecture data_home runtime_root flavor
+
+  require_command curl
+  require_command find
+  require_command install
+  require_command mktemp
+  require_command sha256sum
+  require_command stat
+  require_command tar
+  require_command timeout
+  require_command uname
+  require_command realpath
+
+  machine_architecture="$(uname -m)"
+  case "$machine_architecture" in
+    x86_64 | amd64) architecture=x64 ;;
+    aarch64 | arm64) architecture=arm64 ;;
+    *)
+      fail "automatic llama.cpp installation supports x86-64 and ARM64 Linux; supply a compatible llama-server path on $machine_architecture"
+      ;;
+  esac
+
+  data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+  [[ "$data_home" == /* ]] || fail "XDG_DATA_HOME must be absolute when configured"
+  runtime_root="$data_home/no-more-404/llama.cpp"
+  install -d -m 0700 "$runtime_root"
+  [[ -d "$runtime_root" && ! -L "$runtime_root" ]] ||
+    fail "runtime installation directory must be a regular directory: $runtime_root"
+  [[ "$(stat -Lc '%u' -- "$runtime_root")" == "$EUID" ]] ||
+    fail "runtime installation directory is not owned by the current user: $runtime_root"
+  chmod 0700 "$runtime_root"
+
+  trap cleanup_setup_artifacts EXIT
+  for flavor in vulkan cpu; do
+    if install_runtime_flavor "$flavor" "$architecture" "$runtime_root"; then
+      cleanup_setup_artifacts
+      trap - EXIT
+      return 0
+    fi
+    if [[ "$flavor" == vulkan ]]; then
+      printf 'Trying the portable CPU runtime instead.\n' >&2
+    fi
+  done
+  fail "no pinned llama.cpp runtime could run on this system; install a compatible build manually and re-run setup"
+}
+
+find_available_probe_port() {
+  local preferred_port="$1"
+  local candidate_port
+
+  [[ "$preferred_port" =~ ^[0-9]+$ ]] || preferred_port=55984
+  for ((candidate_port = preferred_port; candidate_port <= preferred_port + 100; candidate_port++)); do
+    (( candidate_port <= 65535 )) || break
+    if ! ss -H -ltn "sport = :$candidate_port" 2>/dev/null | grep -q .; then
+      printf '%s' "$candidate_port"
+      return 0
+    fi
+  done
+  return 1
+}
+
+llama_server_missing_setup_flags() {
+  local binary_path="$1"
+  local help_output required_flag
+  local -a missing_flags=()
+  local -a required_flags=(
+    --model
+    --alias
+    --parallel
+    --fit
+    --fit-target
+    --fit-ctx
+    --flash-attn
+    --jinja
+    --cache-prompt
+    --host
+    --port
+    --timeout
+    --no-webui
+    --no-slots
+    --list-devices
+    --models-preset
+    --models-max
+    --models-autoload
+    --sleep-idle-seconds
+  )
+
+  help_output="$("$binary_path" --help 2>&1 || true)"
+  for required_flag in "${required_flags[@]}"; do
+    grep -Fq -- "$required_flag" <<<"$help_output" || missing_flags+=("$required_flag")
+  done
+  printf '%s' "${missing_flags[*]}"
+}
+
+llama_fit_params_missing_flags() {
+  local binary_path="$1"
+  local help_output required_flag
+  local -a missing_flags=()
+  local -a required_flags=(
+    --model
+    --parallel
+    --fit
+    --fit-target
+    --fit-ctx
+    --flash-attn
+    --verbose
+  )
+
+  help_output="$("$binary_path" --help 2>&1 || true)"
+  for required_flag in "${required_flags[@]}"; do
+    grep -Fq -- "$required_flag" <<<"$help_output" || missing_flags+=("$required_flag")
+  done
+  printf '%s' "${missing_flags[*]}"
+}
+
+find_llama_fit_params() {
+  local server_path="$1"
+  local candidate resolved_candidate
+
+  candidate="$(dirname -- "$server_path")/llama-fit-params"
+  resolved_candidate="$(realpath -e -- "$candidate" 2>/dev/null || true)"
+  [[ -n "$resolved_candidate" && -f "$resolved_candidate" && -x "$resolved_candidate" ]] ||
+    return 1
+  printf '%s' "$resolved_candidate"
+}
+
+gguf_total_bytes() {
+  local model_path="$1"
+  local model_directory model_filename shard_prefix shard_count shard_number shard_path shard_bytes
+  local total_bytes=0
+
+  model_directory="$(dirname -- "$model_path")"
+  model_filename="$(basename -- "$model_path")"
+  if [[ "$model_filename" =~ ^(.*)-([0-9]{5})-of-([0-9]{5})\.gguf$ ]]; then
+    shard_prefix="${BASH_REMATCH[1]}"
+    shard_count=$((10#${BASH_REMATCH[3]}))
+    (( shard_count > 0 )) || return 1
+    for ((shard_number = 1; shard_number <= shard_count; shard_number++)); do
+      printf -v shard_path '%s/%s-%05d-of-%05d.gguf' \
+        "$model_directory" "$shard_prefix" "$shard_number" "$shard_count"
+      [[ -f "$shard_path" && -r "$shard_path" && -s "$shard_path" ]] || return 1
+      shard_bytes="$(stat -c '%s' -- "$shard_path" 2>/dev/null || true)"
+      [[ "$shard_bytes" =~ ^[0-9]+$ ]] || return 1
+      total_bytes=$(( total_bytes + shard_bytes ))
+    done
+  else
+    total_bytes="$(stat -c '%s' -- "$model_path" 2>/dev/null || true)"
+    [[ "$total_bytes" =~ ^[0-9]+$ ]] || return 1
+  fi
+  printf '%s' "$total_bytes"
+}
+
+available_ram_mib() {
+  local available
+
+  available="$(awk '/^MemAvailable:/ { print int($2 / 1024); exit }' /proc/meminfo 2>/dev/null || true)"
+  [[ "$available" =~ ^[0-9]+$ && "$available" -gt 0 ]] || return 1
+  printf '%s' "$available"
+}
+
+conservative_gguf_ceiling_mib() {
+  local available_ram_mib_value="$1"
+  local ram_reserve_mib usable_ram_mib
+
+  ram_reserve_mib=$(( available_ram_mib_value / 5 ))
+  (( ram_reserve_mib >= 4096 )) || ram_reserve_mib=4096
+  usable_ram_mib=$(( available_ram_mib_value - ram_reserve_mib ))
+  (( usable_ram_mib > 0 )) || return 1
+  printf '%s' $(( usable_ram_mib * 70 / 100 ))
+}
+
+print_smaller_gguf_guidance() {
+  local model_mib="$1"
+  local suggested_mib="$2"
+  local selected_gib suggested_gib
+
+  (( model_mib > 0 && suggested_mib > 0 )) || return 0
+  selected_gib="$(awk -v mib="$model_mib" 'BEGIN { printf "%.1f", mib / 1024 }')"
+  suggested_gib="$(awk -v mib="$suggested_mib" 'BEGIN { printf "%.1f", mib / 1024 }')"
+  printf 'The selected GGUF set is approximately %s GiB. Based on memory available now, try a GGUF around %s GiB or smaller.\n' \
+    "$selected_gib" "$suggested_gib" >&2
+  printf 'That is a conservative file-size estimate, not a model recommendation; quantisation and architecture also affect memory use.\n' >&2
+}
+
+suggest_smaller_gguf() {
+  local binary_path="$1"
+  local model_path="$2"
+  local model_bytes model_mib available_ram_mib_value ram_reserve_mib usable_ram_mib
+  local device_output free_device_mib device_count usable_device_mib capacity_mib
+  local suggested_mib reduced_model_mib
+
+  model_bytes="$(gguf_total_bytes "$model_path" 2>/dev/null || printf '0')"
+  [[ "$model_bytes" =~ ^[0-9]+$ ]] || model_bytes=0
+  model_mib=$(( (model_bytes + 1048575) / 1048576 ))
+  available_ram_mib_value="$(available_ram_mib 2>/dev/null || printf '0')"
+  [[ "$available_ram_mib_value" =~ ^[0-9]+$ ]] || available_ram_mib_value=0
+
+  device_output="$("$binary_path" --list-devices 2>&1 || true)"
+  free_device_mib="$(
+    sed -nE 's/.*\([0-9]+ MiB, ([0-9]+) MiB free\).*/\1/p' <<<"$device_output" |
+      awk '{ total += $1 } END { print total + 0 }'
+  )"
+  device_count="$(
+    sed -nE 's/.*\([0-9]+ MiB, ([0-9]+) MiB free\).*/\1/p' <<<"$device_output" |
+      awk 'END { print NR + 0 }'
+  )"
+
+  ram_reserve_mib=$(( available_ram_mib_value / 5 ))
+  (( ram_reserve_mib >= 4096 )) || ram_reserve_mib=4096
+  usable_ram_mib=$(( available_ram_mib_value - ram_reserve_mib ))
+  (( usable_ram_mib > 0 )) || usable_ram_mib=0
+  usable_device_mib=$(( free_device_mib - (device_count * AUTO_FIT_MARGIN_MIB) ))
+  (( usable_device_mib > 0 )) || usable_device_mib=0
+
+  capacity_mib="$usable_ram_mib"
+  (( usable_device_mib <= capacity_mib )) || capacity_mib="$usable_device_mib"
+  (( capacity_mib > 0 && model_mib > 0 )) || return 0
+
+  # Leave substantial room for the 64K-or-larger KV cache, compute buffers,
+  # and imperfect shared-memory reporting. This is guidance, not admission.
+  suggested_mib=$(( capacity_mib * 70 / 100 ))
+  reduced_model_mib=$(( model_mib * 3 / 4 ))
+  if (( suggested_mib >= model_mib )); then
+    suggested_mib="$reduced_model_mib"
+  fi
+  (( suggested_mib > 0 )) || return 0
+
+  print_smaller_gguf_guidance "$model_mib" "$suggested_mib"
+}
+
+run_conservative_memory_fallback() {
+  local model_path="$1"
+  local reason="$2"
+  local model_bytes model_mib available_mib ceiling_mib answer
+
+  printf '\nA compatible llama-fit-params companion was not available (%s).\n' "$reason" >&2
+  printf 'NoMore404 is using a conservative physical-RAM check instead; swap is not counted.\n' >&2
+
+  model_bytes="$(gguf_total_bytes "$model_path" 2>/dev/null || printf '0')"
+  [[ "$model_bytes" =~ ^[0-9]+$ ]] || model_bytes=0
+  model_mib=$(( (model_bytes + 1048575) / 1048576 ))
+  available_mib="$(available_ram_mib 2>/dev/null || printf '0')"
+  ceiling_mib="$(conservative_gguf_ceiling_mib "$available_mib" 2>/dev/null || printf '0')"
+
+  if (( model_mib > 0 && ceiling_mib > 0 && model_mib <= ceiling_mib )); then
+    printf 'Conservative RAM preflight passed. The temporary model test will make the final check.\n'
+    return 0
+  fi
+
+  if (( model_mib > 0 && ceiling_mib > 0 )); then
+    print_smaller_gguf_guidance "$model_mib" "$ceiling_mib"
+  else
+    printf 'NoMore404 could not calculate a dependable GGUF-size ceiling from current physical memory.\n' >&2
+  fi
+  printf 'Loading this GGUF could exhaust physical memory and make the desktop unresponsive.\n' >&2
+  printf 'Continue with the temporary model load anyway? [y/N]: '
+  IFS= read -r answer || answer=''
+  case "${answer,,}" in
+    y | yes)
+      printf 'Continuing only because you explicitly approved the temporary load.\n'
+      ;;
+    *)
+      printf 'Temporary model load cancelled before llama-server was started.\n' >&2
+      return 1
+      ;;
+  esac
+}
+
+run_memory_preflight() {
+  local binary_path="$1"
+  local model_path="$2"
+  local fit_binary missing_flags fit_log preflight_status
+
+  fit_binary="$(find_llama_fit_params "$binary_path" 2>/dev/null || true)"
+  if [[ -z "$fit_binary" ]]; then
+    run_conservative_memory_fallback "$model_path" 'companion executable not found'
+    return
+  fi
+
+  missing_flags="$(llama_fit_params_missing_flags "$fit_binary")"
+  if [[ -n "$missing_flags" ]]; then
+    run_conservative_memory_fallback "$model_path" "missing required flags: $missing_flags"
+    return
+  fi
+
+  fit_log="$(mktemp "$CONFIG_DIR/.memory-preflight.log.XXXXXX")"
+  setup_temporary_files+=("$fit_log")
+  printf '\nChecking whether the selected GGUF can fit before loading model weights.\n'
+  if timeout \
+    --foreground \
+    --signal=TERM \
+    --kill-after=5s \
+    "${MEMORY_PREFLIGHT_TIMEOUT_SECONDS}s" \
+    "$fit_binary" \
+    --model "$model_path" \
+    --parallel 1 \
+    --fit on \
+    --fit-target "$AUTO_FIT_MARGIN_MIB" \
+    --fit-ctx "$HERMES_MIN_CONTEXT_LENGTH" \
+    --flash-attn auto \
+    --verbose \
+    >"$fit_log" 2>&1; then
+    printf 'Memory preflight passed without loading model weights.\n'
+    return 0
+  else
+    preflight_status=$?
+  fi
+
+  if (( preflight_status == 124 || preflight_status == 137 )); then
+    printf 'Memory preflight failed: llama-fit-params did not finish within %s seconds.\n' \
+      "$MEMORY_PREFLIGHT_TIMEOUT_SECONDS" >&2
+  else
+    printf 'Memory preflight failed before llama-server was started.\n' >&2
+  fi
+  if [[ -r "$fit_log" ]] && grep -Eiq \
+    '(out of memory|failed to fit|insufficient memory|cannot allocate memory|bad_alloc|failed to allocate|memory allocation|does not fit)' \
+    "$fit_log"; then
+    suggest_smaller_gguf "$binary_path" "$model_path"
+  fi
+  if [[ -s "$fit_log" ]]; then
+    printf 'Last llama.cpp memory-projection messages:\n' >&2
+    tail -n 12 "$fit_log" >&2
+  fi
+  return 1
+}
+
+show_probe_failure() {
+  local reason="$1"
+  local binary_path="$2"
+  local model_path="$3"
+  local log_path="$4"
+
+  stop_setup_probe
+  printf 'Model test failed: %s\n' "$reason" >&2
+  if [[ "$setup_probe_status" == 137 ]] || {
+    [[ -r "$log_path" ]] && grep -Eiq \
+      '(out of memory|failed to fit|insufficient memory|cannot allocate memory|bad_alloc|failed to allocate|memory allocation)' \
+      "$log_path"
+  }; then
+    suggest_smaller_gguf "$binary_path" "$model_path"
+  fi
+  if [[ -s "$log_path" ]]; then
+    printf 'Last llama.cpp messages:\n' >&2
+    tail -n 12 "$log_path" >&2
+  fi
+}
+
+run_model_probe() {
+  local binary_path="$1"
+  local model_path="$2"
+  local model_name="$3"
+  local preferred_port="$4"
+  local missing_flags probe_port probe_log props_file response_file deadline
+  local effective_context http_code probe_ready=false
+
+  missing_flags="$(llama_server_missing_setup_flags "$binary_path")"
+  [[ -z "$missing_flags" ]] ||
+    fail "the selected llama-server is missing required feature(s): $missing_flags"
+
+  run_memory_preflight "$binary_path" "$model_path" || return 1
+
+  probe_port="$(find_available_probe_port "$preferred_port")" ||
+    fail "could not find a free loopback port for the temporary model test"
+  probe_log="$(mktemp "$CONFIG_DIR/.model-probe.log.XXXXXX")"
+  props_file="$(mktemp "$CONFIG_DIR/.model-probe.props.XXXXXX")"
+  response_file="$(mktemp "$CONFIG_DIR/.model-probe.response.XXXXXX")"
+  setup_temporary_files+=("$probe_log" "$props_file" "$response_file")
+
+  printf '\nTesting the selected model safely on this hardware. Large models can take several minutes.\n'
+  printf 'NoMore404 will accept the context selected by llama.cpp only if it is at least %s.\n' \
+    "$HERMES_MIN_CONTEXT_LENGTH"
+
+  "$binary_path" \
+    --model "$model_path" \
+    --alias "$model_name" \
+    --parallel 1 \
+    --fit on \
+    --fit-target "$AUTO_FIT_MARGIN_MIB" \
+    --fit-ctx "$HERMES_MIN_CONTEXT_LENGTH" \
+    --flash-attn auto \
+    --jinja \
+    --cache-prompt \
+    --host 127.0.0.1 \
+    --port "$probe_port" \
+    --timeout 300 \
+    --no-webui \
+    --no-slots \
+    >"$probe_log" 2>&1 &
+  setup_probe_pid=$!
+  setup_probe_status=''
+
+  deadline=$(( SECONDS + MODEL_PROBE_TIMEOUT_SECONDS ))
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "$setup_probe_pid" 2>/dev/null; then
+      show_probe_failure "llama.cpp exited while loading the model" \
+        "$binary_path" "$model_path" "$probe_log"
+      return 1
+    fi
+    if curl --disable --noproxy '*' --fail --silent --show-error --max-time 2 \
+      "http://127.0.0.1:$probe_port/health" >/dev/null 2>&1; then
+      probe_ready=true
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$probe_ready" != true ]]; then
+    show_probe_failure "the model did not become ready within $MODEL_PROBE_TIMEOUT_SECONDS seconds" \
+      "$binary_path" "$model_path" "$probe_log"
+    return 1
+  fi
+
+  if ! curl --disable --noproxy '*' --fail --silent --show-error --max-time 10 \
+    --output "$props_file" "http://127.0.0.1:$probe_port/props"; then
+    show_probe_failure "llama.cpp became healthy but did not report its fitted context" \
+      "$binary_path" "$model_path" "$probe_log"
+    return 1
+  fi
+  effective_context="$(
+    grep -oE '"n_ctx"[[:space:]]*:[[:space:]]*[0-9]+' "$props_file" |
+      head -n 1 |
+      grep -oE '[0-9]+' || true
+  )"
+  if [[ ! "$effective_context" =~ ^[0-9]+$ ]]; then
+    show_probe_failure "llama.cpp returned an unreadable context value" \
+      "$binary_path" "$model_path" "$probe_log"
+    return 1
+  fi
+  if (( effective_context < HERMES_MIN_CONTEXT_LENGTH )); then
+    stop_setup_probe
+    printf 'Model test failed: llama.cpp reported a %s-token context, below Hermes\047s %s-token minimum.\n' \
+      "$effective_context" "$HERMES_MIN_CONTEXT_LENGTH" >&2
+    printf 'Choose any model whose GGUF metadata and published documentation support at least 64K context; NoMore404 does not select a model for you.\n' >&2
+    return 1
+  fi
+
+  if ! http_code="$(
+    curl --disable --noproxy '*' --silent --show-error --max-time 300 \
+      --header 'Content-Type: application/json' \
+      --output "$response_file" \
+      --write-out '%{http_code}' \
+      --data "{\"model\":\"$model_name\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK.\"}],\"max_tokens\":1,\"temperature\":0}" \
+      "http://127.0.0.1:$probe_port/v1/chat/completions"
+  )"; then
+    show_probe_failure "the local chat test could not reach llama.cpp" \
+      "$binary_path" "$model_path" "$probe_log"
+    return 1
+  fi
+  if [[ "$http_code" != 2?? ]]; then
+    show_probe_failure "the local chat endpoint returned HTTP $http_code; check that the chosen GGUF has a usable chat template" \
+      "$binary_path" "$model_path" "$probe_log"
+    return 1
+  fi
+
+  stop_setup_probe
+  setup_effective_context="$effective_context"
+  printf 'Model test passed. llama.cpp selected a %s-token context for this model and hardware.\n' \
+    "$setup_effective_context"
+}
+
+setup_configuration() {
+  local binary_input binary_path detected_binary model_input model_path model_name setup_path
+  local escaped_binary escaped_preset runtime_temporary model_temporary line configured_port
+  local missing_flags
+
+  require_command grep
+  require_command mktemp
+  require_command realpath
+  require_command curl
+  require_command ss
+  require_command stat
+  require_command timeout
+
+  [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] ||
+    fail "setup requires the regular installed configuration file: $CONFIG_FILE"
+  [[ -f "$MODEL_FILE" && ! -L "$MODEL_FILE" ]] ||
+    fail "setup requires the regular installed model preset: $MODEL_FILE"
+  grep -Fq '/absolute/path/to/llama-server' "$CONFIG_FILE" ||
+    fail "configuration already appears customised; setup will not overwrite it"
+  grep -Fq '/absolute/path/to/main-model.gguf' "$MODEL_FILE" ||
+    fail "model preset already appears customised; setup will not overwrite it"
+
+  printf 'NoMore404 initial setup. No persistent service or Hermes process will be started.\n'
+  printf 'A temporary local model test will run, then release its RAM and VRAM.\n'
+  detected_binary="$(command -v llama-server 2>/dev/null || true)"
+  while true; do
+    if [[ -n "$detected_binary" ]]; then
+      printf 'Path to llama-server [%s]: ' "$detected_binary"
+    else
+      printf 'Path to llama-server, or press Enter to install the verified official runtime: '
+    fi
+    IFS= read -r binary_input || fail "setup ended before a llama-server path was entered"
+    if [[ -z "$binary_input" && -z "$detected_binary" ]]; then
+      install_pinned_runtime
+      binary_input="$provisioned_binary"
+    else
+      binary_input="${binary_input:-$detected_binary}"
+    fi
+    if [[ "$binary_input" == \~/* ]]; then
+      binary_input="$HOME/${binary_input:2}"
+    elif [[ "$binary_input" != */* ]]; then
+      binary_input="$(command -v "$binary_input" 2>/dev/null || true)"
+    fi
+    binary_path="$(realpath -e -- "$binary_input" 2>/dev/null || true)"
+    if [[ -f "$binary_path" && -x "$binary_path" ]]; then
+      missing_flags="$(llama_server_missing_setup_flags "$binary_path")"
+      if [[ -z "$missing_flags" ]]; then
+        break
+      fi
+      printf 'That llama-server is too old or incompatible; missing: %s\n' "$missing_flags" >&2
+      printf 'Enter another path, or press Enter to install the verified pinned runtime.\n' >&2
+      detected_binary=''
+      continue
+    fi
+    printf 'That is not an executable file. Try again.\n' >&2
+  done
+
+  while true; do
+    printf 'Path to one GGUF model file: '
+    IFS= read -r model_input || fail "setup ended before a model path was entered"
+    if [[ "$model_input" == \~/* ]]; then
+      model_input="$HOME/${model_input:2}"
+    fi
+    model_path="$(realpath -e -- "$model_input" 2>/dev/null || true)"
+    if [[ -f "$model_path" && -r "$model_path" && -s "$model_path" ]]; then
+      break
+    fi
+    printf 'That is not a readable, non-empty model file. Try again.\n' >&2
+  done
+
+  printf 'Model name [local-main]: '
+  IFS= read -r model_name || fail "setup ended before the model name was confirmed"
+  model_name="${model_name:-local-main}"
+  [[ "$model_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+    fail "model name may contain only letters, numbers, dots, underscores, and hyphens"
+
+  for setup_path in "$binary_path" "$model_path" "$MODEL_FILE"; do
+    [[ "$setup_path" != *\\* && "$setup_path" != *\"* ]] ||
+      fail "setup cannot safely write a path containing a backslash or double quote"
+  done
+
+  escaped_binary="$binary_path"
+  escaped_preset="$MODEL_FILE"
+  configured_port="$(config_value PORT 55984)"
+  trap cleanup_setup_artifacts EXIT
+  run_model_probe "$binary_path" "$model_path" "$model_name" "$configured_port" ||
+    fail "configuration was not changed because the selected model did not pass its local test"
+
+  runtime_temporary="$(mktemp "$CONFIG_DIR/.runtime.env.setup.XXXXXX")"
+  model_temporary="$(mktemp "$CONFIG_DIR/.models.ini.setup.XXXXXX")"
+  setup_temporary_files+=("$runtime_temporary" "$model_temporary")
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      LLAMA_SERVER_BIN=*) printf 'LLAMA_SERVER_BIN="%s"\n' "$escaped_binary" ;;
+      MODELS_PRESET=*) printf 'MODELS_PRESET="%s"\n' "$escaped_preset" ;;
+      PORT=*) printf 'PORT=%s\n' "$(find_available_probe_port "$configured_port")" ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <"$CONFIG_FILE" >"$runtime_temporary"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      '[local-main]') printf '[%s]\n' "$model_name" ;;
+      'ctx-size = 0') printf 'ctx-size = %s\n' "$setup_effective_context" ;;
+      'model = /absolute/path/to/main-model.gguf') printf 'model = %s\n' "$model_path" ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <"$MODEL_FILE" >"$model_temporary"
+
+  grep -Fq "LLAMA_SERVER_BIN=\"$binary_path\"" "$runtime_temporary" ||
+    fail "could not prepare the llama-server configuration"
+  grep -Fq "MODELS_PRESET=\"$MODEL_FILE\"" "$runtime_temporary" ||
+    fail "could not prepare the model-preset configuration"
+  grep -Fq "[$model_name]" "$model_temporary" ||
+    fail "could not prepare the model name"
+  grep -Fq "model = $model_path" "$model_temporary" ||
+    fail "could not prepare the model path"
+  grep -Fq "ctx-size = $setup_effective_context" "$model_temporary" ||
+    fail "could not save llama.cpp's fitted context"
+  if grep -Fq '/absolute/path/to/llama-server' "$runtime_temporary" ||
+    grep -Fq '/absolute/path/to/models.ini' "$runtime_temporary" ||
+    grep -Fq '/absolute/path/to/main-model.gguf' "$model_temporary" ||
+    grep -Eq '^[[:space:]]*ctx-size[[:space:]]*=[[:space:]]*0([[:space:]]*|$)' "$model_temporary"; then
+    fail "prepared configuration still contains an example placeholder"
+  fi
+
+  chmod 0600 "$runtime_temporary" "$model_temporary"
+  mv -f -- "$model_temporary" "$MODEL_FILE"
+  mv -f -- "$runtime_temporary" "$CONFIG_FILE"
+  cleanup_setup_artifacts
+  trap - EXIT
+
+  printf '\nConfiguration saved without starting the runtime.\n'
+  offer_hermes_registration
+  printf '\n'
+  printf 'Next, run: %s doctor\n' "$0"
+}
+
+trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+config_value() {
+  local key="$1"
+  local default_value="$2"
+  local line value
+
+  if [[ ! -r "$CONFIG_FILE" ]]; then
+    printf '%s' "$default_value"
+    return
+  fi
+
+  line="$(awk -v wanted="$key" '
+    /^[[:space:]]*#/ { next }
+    {
+      candidate = $0
+      sub(/^[[:space:]]*/, "", candidate)
+      separator = index(candidate, "=")
+      if (separator == 0) { next }
+      candidate_key = substr(candidate, 1, separator - 1)
+      sub(/[[:space:]]+$/, "", candidate_key)
+      if (candidate_key == wanted) { found = candidate }
+    }
+    END { if (found != "") print found }
+  ' "$CONFIG_FILE")"
+
+  if [[ -z "$line" ]]; then
+    printf '%s' "$default_value"
+    return
+  fi
+
+  value="$(trim_whitespace "${line#*=}")"
+  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  printf '%s' "$value"
+}
+
+endpoint_url() {
+  local host port
+  host="$(config_value BIND_HOST 127.0.0.1)"
+  port="$(config_value PORT 55984)"
+  case "$host" in
+    127.0.0.1) ;;
+    ::1) host='[::1]' ;;
+    *) fail "BIND_HOST must be an explicit loopback address (127.0.0.1 or ::1)" ;;
+  esac
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1024 || port > 65535 )); then
+    fail "PORT must be between 1024 and 65535"
+  fi
+  printf 'http://%s:%s/v1' "$host" "$port"
+}
+
+model_catalog_rows() {
+  local preset_path="${1:-$MODEL_FILE}"
+
+  awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function unquote(value, first, last) {
+      first = substr(value, 1, 1)
+      last = substr(value, length(value), 1)
+      if (length(value) >= 2 && ((first == "\"" && last == "\"") ||
+          (first == "\047" && last == "\047"))) {
+        return substr(value, 2, length(value) - 2)
+      }
+      return value
+    }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      stripped = trim(line)
+      if (stripped == "" || stripped ~ /^[#;]/) {
+        next
+      }
+      if (stripped ~ /^\[[^]]+\][[:space:]]*([#;].*)?$/) {
+        sub(/^\[/, "", stripped)
+        sub(/\][[:space:]]*([#;].*)?$/, "", stripped)
+        section = trim(stripped)
+        if (section != "*" && !(section in seen)) {
+          names[++count] = section
+          seen[section] = 1
+        }
+        next
+      }
+      equals = index(line, "=")
+      if (equals == 0) {
+        next
+      }
+      key = tolower(trim(substr(line, 1, equals - 1)))
+      value = trim(substr(line, equals + 1))
+      sub(/[[:space:]]+[;#].*$/, "", value)
+      value = unquote(trim(value))
+      if (key == "ctx-size") {
+        if (section == "" || section == "*") {
+          global_context = value
+        } else {
+          model_context[section] = value
+        }
+      } else if (key == "model" && section != "" && section != "*" && value != "") {
+        has_model[section] = 1
+      }
+    }
+    END {
+      for (row_number = 1; row_number <= count; row_number++) {
+        name = names[row_number]
+        if (!has_model[name]) {
+          continue
+        }
+        context = (name in model_context) ? model_context[name] : global_context
+        printf "%s\t%s\n", name, context
+      }
+    }
+  ' "$preset_path"
+}
+
+model_auto_fit_rows() {
+  local preset_path="${1:-$MODEL_FILE}"
+
+  awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function unquote(value, first, last) {
+      first = substr(value, 1, 1)
+      last = substr(value, length(value), 1)
+      if (length(value) >= 2 && ((first == "\"" && last == "\"") ||
+          (first == "\047" && last == "\047"))) {
+        return substr(value, 2, length(value) - 2)
+      }
+      return value
+    }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      stripped = trim(line)
+      if (stripped == "" || stripped ~ /^[#;]/) {
+        next
+      }
+      if (stripped ~ /^\[[^]]+\][[:space:]]*([#;].*)?$/) {
+        sub(/^\[/, "", stripped)
+        sub(/\][[:space:]]*([#;].*)?$/, "", stripped)
+        section = trim(stripped)
+        if (section != "*" && !(section in seen)) {
+          names[++count] = section
+          seen[section] = 1
+        }
+        next
+      }
+      equals = index(line, "=")
+      if (equals == 0) {
+        next
+      }
+      key = tolower(trim(substr(line, 1, equals - 1)))
+      value = trim(substr(line, equals + 1))
+      sub(/[[:space:]]+[;#].*$/, "", value)
+      value = unquote(trim(value))
+      if (key == "model" && section != "" && section != "*" && value != "") {
+        has_model[section] = 1
+      } else if (key == "fit" || key == "fit-target" || key == "fit-ctx" ||
+          key == "n-gpu-layers" || key == "gpu-layers" || key == "ngl") {
+        canonical = key
+        if (key == "gpu-layers" || key == "ngl") {
+          canonical = "n-gpu-layers"
+        }
+        if (section == "" || section == "*") {
+          global_value[canonical] = value
+        } else {
+          model_value[section, canonical] = value
+        }
+      }
+    }
+    END {
+      keys[1] = "fit"
+      keys[2] = "fit-target"
+      keys[3] = "fit-ctx"
+      keys[4] = "n-gpu-layers"
+      for (row_number = 1; row_number <= count; row_number++) {
+        name = names[row_number]
+        if (!has_model[name]) {
+          continue
+        }
+        printf "%s", name
+        for (key_number = 1; key_number <= 4; key_number++) {
+          wanted = keys[key_number]
+          value = ((name, wanted) in model_value) ? model_value[name, wanted] : global_value[wanted]
+          if (value == "") {
+            value = "__UNSET__"
+          }
+          printf "\t%s", value
+        }
+        printf "\n"
+      }
+    }
+  ' "$preset_path"
+}
+
+hermes_config_get() {
+  local hermes_binary="$1"
+  local key="$2"
+  "$hermes_binary" config get "$key" 2>/dev/null || true
+}
+
+escape_hermes_config_segment() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//./\\.}"
+  printf '%s' "$value"
+}
+
+register_hermes_models() {
+  local hermes_binary endpoint existing_endpoint selected_model_before
+  local selected_provider_before selected_model_after selected_provider_after
+  local row model_name model_context escaped_model actual_value index
+  local -a model_rows=()
+  local -a provider_settings=()
+
+  require_command awk
+  [[ -f "$MODEL_FILE" && ! -L "$MODEL_FILE" && -r "$MODEL_FILE" ]] ||
+    fail "Hermes registration requires the readable installed model preset: $MODEL_FILE"
+
+  hermes_binary="$(command -v hermes 2>/dev/null || true)"
+  [[ -n "$hermes_binary" ]] ||
+    fail "Hermes CLI was not found; install Hermes, then run '$0 register-hermes'"
+  "$hermes_binary" config set --help >/dev/null 2>&1 ||
+    fail "the installed Hermes version does not support 'hermes config set'; use 'hermes model' instead"
+
+  endpoint="$(endpoint_url)"
+  mapfile -t model_rows < <(model_catalog_rows "$MODEL_FILE")
+  (( ${#model_rows[@]} > 0 )) ||
+    fail "model preset does not contain a named model entry"
+
+  # Validate every entry before asking Hermes to write anything. Hermes needs
+  # a 64K window for its system prompt, tools, and working conversation.
+  for row in "${model_rows[@]}"; do
+    IFS=$'\t' read -r model_name model_context <<<"$row"
+    [[ "$model_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+      fail "model preset [$model_name] uses an unsafe alias; use only letters, numbers, dots, underscores, and hyphens"
+    [[ "$model_context" =~ ^[0-9]+$ ]] ||
+      fail "model preset [$model_name] needs an explicit numeric ctx-size"
+    (( model_context >= HERMES_MIN_CONTEXT_LENGTH )) ||
+      fail "model preset [$model_name] ctx-size must be at least $HERMES_MIN_CONTEXT_LENGTH for Hermes"
+  done
+
+  # Refuse to take over an unrelated provider that happens to use our slug.
+  existing_endpoint="$(hermes_config_get "$hermes_binary" "providers.$HERMES_PROVIDER_KEY.api")"
+  [[ -n "$existing_endpoint" ]] ||
+    existing_endpoint="$(hermes_config_get "$hermes_binary" "providers.$HERMES_PROVIDER_KEY.base_url")"
+  if [[ -n "$existing_endpoint" && "${existing_endpoint%/}" != "${endpoint%/}" ]]; then
+    fail "Hermes provider '$HERMES_PROVIDER_KEY' already points to a different endpoint; it was not changed"
+  fi
+
+  selected_model_before="$(hermes_config_get "$hermes_binary" model.default)"
+  selected_provider_before="$(hermes_config_get "$hermes_binary" model.provider)"
+  provider_settings=(
+    "providers.$HERMES_PROVIDER_KEY.api" "$endpoint"
+    "providers.$HERMES_PROVIDER_KEY.name" "$HERMES_PROVIDER_NAME"
+    "providers.$HERMES_PROVIDER_KEY.transport" chat_completions
+    "providers.$HERMES_PROVIDER_KEY.discover_models" false
+  )
+
+  for ((index = 0; index < ${#provider_settings[@]}; index += 2)); do
+    "$hermes_binary" config set \
+      "${provider_settings[$index]}" "${provider_settings[$((index + 1))]}" >/dev/null ||
+      fail "Hermes refused to save ${provider_settings[$index]}"
+  done
+
+  for row in "${model_rows[@]}"; do
+    IFS=$'\t' read -r model_name model_context <<<"$row"
+    escaped_model="$(escape_hermes_config_segment "$model_name")"
+    "$hermes_binary" config set \
+      "providers.$HERMES_PROVIDER_KEY.models.$escaped_model.context_length" \
+      "$model_context" >/dev/null ||
+      fail "Hermes refused to register model '$model_name'; provider settings may already be saved, so inspect 'hermes config' and re-run '$0 register-hermes'"
+  done
+
+  actual_value="$(hermes_config_get "$hermes_binary" "providers.$HERMES_PROVIDER_KEY.api")"
+  [[ "${actual_value%/}" == "${endpoint%/}" ]] ||
+    fail "Hermes did not retain the NoMore404 endpoint"
+  for row in "${model_rows[@]}"; do
+    IFS=$'\t' read -r model_name model_context <<<"$row"
+    escaped_model="$(escape_hermes_config_segment "$model_name")"
+    actual_value="$(hermes_config_get "$hermes_binary" \
+      "providers.$HERMES_PROVIDER_KEY.models.$escaped_model.context_length")"
+    [[ "$actual_value" == "$model_context" ]] ||
+      fail "Hermes did not retain registered model '$model_name'"
+  done
+
+  selected_model_after="$(hermes_config_get "$hermes_binary" model.default)"
+  selected_provider_after="$(hermes_config_get "$hermes_binary" model.provider)"
+  [[ "$selected_model_after" == "$selected_model_before" &&
+    "$selected_provider_after" == "$selected_provider_before" ]] ||
+    fail "Hermes's current model changed unexpectedly; inspect 'hermes config' before continuing"
+
+  printf 'Registered %d model(s) under "%s" in Hermes.\n' \
+    "${#model_rows[@]}" "$HERMES_PROVIDER_NAME"
+  printf "Hermes's current model was not changed. In Hermes Desktop, choose Refresh models, then select the local model.\n"
+}
+
+offer_hermes_registration() {
+  local answer
+
+  if ! command -v hermes >/dev/null 2>&1; then
+    printf 'Hermes was not found. After installing it, run: %s register-hermes\n' "$0"
+    return
+  fi
+
+  printf "Add the configured model to Hermes Desktop's picker without changing the current model? [Y/n]: "
+  if ! IFS= read -r answer; then
+    printf '\nNo answer received; Hermes was not changed. Run: %s register-hermes\n' "$0"
+    return
+  fi
+
+  case "${answer,,}" in
+    '' | y | yes) register_hermes_models ;;
+    n | no) printf 'Hermes was not changed. Run later: %s register-hermes\n' "$0" ;;
+    *) printf 'Answer not recognised; Hermes was not changed. Run later: %s register-hermes\n' "$0" ;;
+  esac
+}
+
+health_url() {
+  local endpoint
+  endpoint="$(endpoint_url)"
+  printf '%s/health' "${endpoint%/v1}"
+}
+
+router_is_ready() {
+  curl --disable --noproxy '*' --fail --silent --show-error --max-time 2 "$(health_url)" >/dev/null 2>&1
+}
+
+router_start_timeout_seconds() {
+  local timeout_seconds
+  timeout_seconds="$(config_value ROUTER_START_TIMEOUT_SECONDS 20)"
+  if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]] || (( timeout_seconds <= 0 )); then
+    fail "ROUTER_START_TIMEOUT_SECONDS must be a positive integer"
+  fi
+  printf '%s' "$timeout_seconds"
+}
+
+acquire_session_lock() {
+  local contention_message="$1"
+  local session_lock_file
+
+  require_command flock
+  [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -O "$XDG_RUNTIME_DIR" ]] ||
+    fail "XDG_RUNTIME_DIR must be an existing directory owned by the current user"
+
+  session_lock_file="$XDG_RUNTIME_DIR/no-more-404-session.lock"
+  exec {session_lock_fd}>"$session_lock_file"
+  flock --nonblock "$session_lock_fd" || fail "$contention_message"
+}
+
+port_has_listener() {
+  local port
+  port="$(config_value PORT 55984)"
+  ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .
+}
+
+listener_is_managed() {
+  local main_pid port
+  main_pid="$(systemctl --user show "$ROUTER_UNIT" --property=MainPID --value 2>/dev/null || true)"
+  port="$(config_value PORT 55984)"
+  [[ "$main_pid" =~ ^[0-9]+$ ]] && (( main_pid > 0 )) || return 1
+  ss -H -ltnp "sport = :$port" 2>/dev/null | grep -Fq "pid=$main_pid,"
+}
+
+wait_for_router() {
+  local timeout_seconds attempts attempt
+  timeout_seconds="$(router_start_timeout_seconds)"
+  attempts=$(( timeout_seconds * 2 ))
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if systemctl --user is-active --quiet "$ROUTER_UNIT" && listener_is_managed && router_is_ready; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+start_runtime() {
+  local owned_runtime=false
+  require_user_systemd
+  require_command curl
+  require_command ss
+  endpoint_url >/dev/null
+  router_start_timeout_seconds >/dev/null
+  acquire_session_lock \
+    "another lifecycle operation or run session is active; start is refused to preserve runtime ownership"
+
+  if ! systemctl --user is-active --quiet "$TARGET_UNIT"; then
+    port_has_listener && fail "configured port is already occupied by another listener"
+    systemctl --user start "$TARGET_UNIT"
+    owned_runtime=true
+  fi
+  if ! wait_for_router; then
+    systemctl --user status --no-pager "$ROUTER_UNIT" >&2 || true
+    if [[ "$owned_runtime" == true ]]; then
+      stop_target_after_failure "after router readiness failed" || true
+    fi
+    fail "router did not become healthy at $(health_url)"
+  fi
+  printf 'Driftless-NoMore404 is ready at %s\n' "$(endpoint_url)"
+}
+
+stop_runtime() {
+  require_user_systemd
+  systemctl --user stop "$TARGET_UNIT"
+}
+
+stop_target_after_failure() {
+  local context="$1"
+  if systemctl --user stop "$TARGET_UNIT"; then
+    return 0
+  fi
+  printf 'no-more-404: failed to stop %s %s; the runtime may still be active\n' \
+    "$TARGET_UNIT" "$context" >&2
+  return 1
+}
+
+doctor() {
+  local failures=0 warnings=0 binary preset host port mode help_output
+  local setting setting_value cache_dir target_enablement target_active=false
+  local metrics_enabled slots_enabled
+  local model_path model_path_count=0 invalid_model_path_count=0
+  local model_row model_name model_context model_context_count=0
+  local invalid_model_context_count=0
+  local fit_row fit_value fit_target fit_context gpu_layers fit_model_count=0
+  local invalid_fit_count=0
+  local -a required_flags=()
+
+  check_ok() { printf 'OK   %s\n' "$*"; }
+  check_warn() { printf 'WARN %s\n' "$*"; warnings=$((warnings + 1)); }
+  check_fail() { printf 'FAIL %s\n' "$*"; failures=$((failures + 1)); }
+
+  if command -v systemctl >/dev/null 2>&1 &&
+    systemctl --user show-environment >/dev/null 2>&1; then
+    check_ok "systemd user manager is reachable"
+  else
+    check_fail "systemd user manager is not reachable"
+  fi
+
+  for setting in curl flock ss; do
+    if command -v "$setting" >/dev/null 2>&1; then
+      check_ok "required command is available: $setting"
+    else
+      check_fail "required command is missing: $setting"
+    fi
+  done
+
+  if [[ -f "$CONFIG_FILE" ]]; then
+    check_ok "runtime configuration exists"
+    mode="$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || true)"
+    if [[ "$mode" == 600 ]]; then
+      check_ok "runtime configuration mode is 0600"
+    else
+      check_warn "runtime configuration mode is ${mode:-unknown}; 0600 is recommended"
+    fi
+  else
+    check_fail "missing runtime configuration: $CONFIG_FILE"
+  fi
+
+  for unit_path in \
+    "$UNIT_DIR/$TARGET_UNIT" \
+    "$UNIT_DIR/$ROUTER_UNIT" \
+    "$UNIT_DIR/$WATCH_SERVICE_UNIT" \
+    "$UNIT_DIR/$WATCH_TIMER_UNIT"; do
+    if [[ -f "$unit_path" ]]; then
+      check_ok "installed unit $(basename "$unit_path")"
+    else
+      check_fail "missing installed unit: $unit_path"
+    fi
+  done
+
+  binary="$(config_value LLAMA_SERVER_BIN '')"
+  preset="$(config_value MODELS_PRESET '')"
+  host="$(config_value BIND_HOST 127.0.0.1)"
+  port="$(config_value PORT 55984)"
+
+  for setting in MAX_MODELS IDLE_SECONDS REQUEST_TIMEOUT_SECONDS ROUTER_START_TIMEOUT_SECONDS; do
+    case "$setting" in
+      MAX_MODELS) setting_value="$(config_value "$setting" 1)" ;;
+      IDLE_SECONDS) setting_value="$(config_value "$setting" 60)" ;;
+      REQUEST_TIMEOUT_SECONDS) setting_value="$(config_value "$setting" 1800)" ;;
+      ROUTER_START_TIMEOUT_SECONDS) setting_value="$(config_value "$setting" 20)" ;;
+    esac
+    if [[ "$setting_value" =~ ^[0-9]+$ ]] && (( setting_value > 0 )); then
+      check_ok "$setting is a positive integer"
+    else
+      check_fail "$setting must be a positive integer"
+    fi
+  done
+
+  setting_value="$(config_value HEALTH_FAILURES_REQUIRED 2)"
+  if [[ "$setting_value" =~ ^[0-9]+$ ]] && (( setting_value >= 2 )); then
+    check_ok "HEALTH_FAILURES_REQUIRED is at least two"
+  else
+    check_fail "HEALTH_FAILURES_REQUIRED must be an integer of at least two"
+  fi
+
+  for setting in ENABLE_METRICS ENABLE_SLOTS; do
+    case "$setting" in
+      ENABLE_METRICS)
+        metrics_enabled="$(config_value "$setting" false)"
+        setting_value="$metrics_enabled"
+        ;;
+      ENABLE_SLOTS)
+        slots_enabled="$(config_value "$setting" false)"
+        setting_value="$slots_enabled"
+        ;;
+    esac
+    case "$setting_value" in
+      true | false) check_ok "$setting is true or false" ;;
+      *) check_fail "$setting must be true or false" ;;
+    esac
+  done
+
+  cache_dir="$(config_value LLAMA_CACHE_DIR '')"
+  if [[ -z "$cache_dir" || "$cache_dir" == /* ]]; then
+    check_ok "LLAMA_CACHE_DIR is omitted or absolute"
+  else
+    check_fail "LLAMA_CACHE_DIR must be an absolute path when configured"
+  fi
+
+  if [[ "$binary" == /* && -x "$binary" ]]; then
+    check_ok "llama-server binary is executable"
+    help_output="$("$binary" --help 2>&1 || true)"
+    required_flags=(
+      --models-preset
+      --models-max
+      --models-autoload
+      --sleep-idle-seconds
+      --fit
+      --fit-target
+      --fit-ctx
+      --parallel
+      --flash-attn
+      --jinja
+      --cache-prompt
+      --host
+      --port
+      --timeout
+      --no-webui
+    )
+    [[ "$metrics_enabled" == true ]] && required_flags+=(--metrics)
+    if [[ "$slots_enabled" == true ]]; then
+      required_flags+=(--slots)
+    else
+      required_flags+=(--no-slots)
+    fi
+    for flag in "${required_flags[@]}"; do
+      if grep -Fq -- "$flag" <<<"$help_output"; then
+        check_ok "llama-server supports $flag"
+      else
+        check_fail "llama-server does not support $flag"
+      fi
+    done
+  else
+    check_fail "LLAMA_SERVER_BIN must name an executable absolute path"
+  fi
+
+  if [[ "$preset" == /* && -f "$preset" && -r "$preset" ]]; then
+    check_ok "model preset is readable"
+    mode="$(stat -c '%a' "$preset" 2>/dev/null || true)"
+    if [[ "$mode" == 600 ]]; then
+      check_ok "model preset mode is 0600"
+    else
+      check_warn "model preset mode is ${mode:-unknown}; 0600 is recommended"
+    fi
+    grep -Eiq '(@MODEL_DIR@|/absolute/path/to)' "$preset" &&
+      check_fail "model preset still contains example placeholders"
+    grep -Eiq '^[[:space:]]*load-on-startup[[:space:]]*=[[:space:]]*true([[:space:]]*|$)' "$preset" &&
+      check_fail "model preset enables startup preloading"
+
+    while IFS= read -r model_path; do
+      model_path="$(trim_whitespace "$model_path")"
+      if [[ "$model_path" == \"*\" && "$model_path" == *\" ]]; then
+        model_path="${model_path:1:${#model_path}-2}"
+      elif [[ "$model_path" == \'*\' && "$model_path" == *\' ]]; then
+        model_path="${model_path:1:${#model_path}-2}"
+      fi
+      model_path_count=$((model_path_count + 1))
+      if [[ "$model_path" != /* || ! -f "$model_path" || ! -r "$model_path" ]]; then
+        invalid_model_path_count=$((invalid_model_path_count + 1))
+      fi
+    done < <(
+      awk '
+        /^[[:space:]]*(model|mmproj)[[:space:]]*=/ {
+          value = $0
+          sub(/^[^=]*=[[:space:]]*/, "", value)
+          print value
+        }
+      ' "$preset"
+    )
+    if (( model_path_count == 0 )); then
+      check_fail "model preset does not contain a model path"
+    elif (( invalid_model_path_count == 0 )); then
+      check_ok "all configured model and projector paths are readable absolute files"
+    else
+      check_fail "model preset contains $invalid_model_path_count invalid or unreadable model/projector path(s)"
+    fi
+
+    while IFS= read -r model_row; do
+      IFS=$'\t' read -r model_name model_context <<<"$model_row"
+      model_context_count=$((model_context_count + 1))
+      if [[ ! "$model_context" =~ ^[0-9]+$ ]] ||
+        (( model_context < HERMES_MIN_CONTEXT_LENGTH )); then
+        check_fail "model preset [$model_name] must set an effective ctx-size of at least $HERMES_MIN_CONTEXT_LENGTH for Hermes (found ${model_context:-missing})"
+        invalid_model_context_count=$((invalid_model_context_count + 1))
+      fi
+    done < <(model_catalog_rows "$preset")
+    if (( model_context_count == 0 )); then
+      check_fail "model preset does not contain a named model entry"
+    elif (( invalid_model_context_count == 0 )); then
+      check_ok "all configured models meet Hermes's 64K minimum context"
+    fi
+
+    while IFS= read -r fit_row; do
+      IFS=$'\t' read -r model_name fit_value fit_target fit_context gpu_layers <<<"$fit_row"
+      fit_model_count=$((fit_model_count + 1))
+      if [[ "$fit_value" != on ]]; then
+        check_fail "model preset [$model_name] must enable fit = on for automatic hardware sizing"
+        invalid_fit_count=$((invalid_fit_count + 1))
+      fi
+      if [[ ! "$fit_target" =~ ^[0-9]+$ ]] || (( fit_target <= 0 )); then
+        check_fail "model preset [$model_name] needs a positive fit-target memory margin"
+        invalid_fit_count=$((invalid_fit_count + 1))
+      fi
+      if [[ ! "$fit_context" =~ ^[0-9]+$ ]] ||
+        (( fit_context < HERMES_MIN_CONTEXT_LENGTH )); then
+        check_fail "model preset [$model_name] fit-ctx must preserve at least $HERMES_MIN_CONTEXT_LENGTH tokens"
+        invalid_fit_count=$((invalid_fit_count + 1))
+      fi
+      if [[ "$gpu_layers" != __UNSET__ && "$gpu_layers" != auto ]]; then
+        check_warn "model preset [$model_name] explicitly sets GPU layers; this overrides llama.cpp's automatic placement"
+      fi
+    done < <(model_auto_fit_rows "$preset")
+    if (( fit_model_count > 0 && invalid_fit_count == 0 )); then
+      check_ok "automatic llama.cpp hardware fitting is enabled with a 64K floor"
+    fi
+  else
+    check_fail "MODELS_PRESET must name a readable absolute path"
+  fi
+
+  case "$host" in
+    127.0.0.1 | ::1) check_ok "router bind address is explicitly loopback-only" ;;
+    *) check_fail "router bind address is not loopback-only: $host" ;;
+  esac
+
+  if [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1024 && port <= 65535 )); then
+    check_ok "router port is unprivileged and valid"
+  else
+    check_fail "router port is invalid: $port"
+  fi
+
+  target_enablement="$(systemctl --user is-enabled "$TARGET_UNIT" 2>/dev/null || true)"
+  case "$target_enablement" in
+    disabled | static) check_ok "runtime target is not enabled at login" ;;
+    enabled) check_fail "runtime target is enabled; installation must remain on-demand" ;;
+    *) check_warn "runtime target enablement is ${target_enablement:-unknown}" ;;
+  esac
+
+  if systemctl --user is-active --quiet "$TARGET_UNIT" 2>/dev/null; then
+    target_active=true
+    if systemctl --user is-active --quiet "$WATCH_TIMER_UNIT" 2>/dev/null; then
+      check_ok "health watchdog timer is active with the runtime target"
+    else
+      check_fail "runtime target is active but its health watchdog timer is not"
+    fi
+  elif systemctl --user is-active --quiet "$WATCH_TIMER_UNIT" 2>/dev/null; then
+    check_fail "health watchdog timer is active while the runtime target is stopped"
+  fi
+
+  if systemctl --user is-active --quiet "$ROUTER_UNIT" 2>/dev/null; then
+    if listener_is_managed && router_is_ready; then
+      check_ok "active router owns the configured listener and answered its health check"
+    else
+      check_fail "router is active but does not own a healthy configured listener"
+    fi
+  else
+    if command -v ss >/dev/null 2>&1 && port_has_listener; then
+      check_fail "configured port is occupied while the router is inactive"
+    fi
+    if [[ "$target_active" == true ]]; then
+      check_fail "runtime target is active but the router service is inactive"
+    else
+      check_warn "router is currently inactive because the runtime target is stopped"
+    fi
+  fi
+
+  printf '\nDoctor finished with %d failure(s) and %d warning(s).\n' "$failures" "$warnings"
+  (( failures == 0 ))
+}
+
+run_with_runtime() {
+  local owned_runtime=false child_pid='' command_status=0 received_signal=''
+
+  [[ "${1:-}" == -- ]] && shift
+  (( $# > 0 )) || fail "run requires a command after --"
+
+  require_user_systemd
+  require_command curl
+  require_command ss
+  endpoint_url >/dev/null
+  router_start_timeout_seconds >/dev/null
+  acquire_session_lock \
+    "another lifecycle operation or owning session is active; run is refused to preserve runtime ownership"
+
+  if ! systemctl --user is-active --quiet "$TARGET_UNIT"; then
+    port_has_listener && fail "configured port is already occupied by another listener"
+    systemctl --user start "$TARGET_UNIT"
+    owned_runtime=true
+  fi
+
+  # shellcheck disable=SC2329 # Called indirectly by the EXIT trap.
+  cleanup() {
+    local cleanup_status=$?
+    trap - EXIT INT TERM HUP
+
+    if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
+      kill -TERM "$child_pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        kill -0 "$child_pid" 2>/dev/null || break
+        sleep 0.1
+      done
+      kill -KILL "$child_pid" 2>/dev/null || true
+      wait "$child_pid" 2>/dev/null || true
+    fi
+
+    if [[ "$owned_runtime" == true ]]; then
+      stop_target_after_failure "after the foreground command exited" || true
+    fi
+    return "$cleanup_status"
+  }
+
+  # shellcheck disable=SC2329 # Called indirectly by signal traps.
+  forward_signal() {
+    local signal="$1"
+    received_signal="$signal"
+    [[ -n "$child_pid" ]] && kill -s "$signal" "$child_pid" 2>/dev/null || true
+  }
+
+  trap cleanup EXIT
+  trap 'forward_signal INT' INT
+  trap 'forward_signal TERM' TERM
+  trap 'forward_signal HUP' HUP
+
+  if ! wait_for_router; then
+    systemctl --user status --no-pager "$ROUTER_UNIT" >&2 || true
+    fail "router did not become healthy at $(health_url)"
+  fi
+
+  (
+    exec {session_lock_fd}>&-
+    exec "$@"
+  ) &
+  child_pid=$!
+  while true; do
+    if wait "$child_pid"; then
+      command_status=0
+      child_pid=''
+      break
+    else
+      command_status=$?
+      if ! kill -0 "$child_pid" 2>/dev/null; then
+        child_pid=''
+        break
+      fi
+      [[ -z "$received_signal" ]] && continue
+      exit "$command_status"
+    fi
+  done
+  child_pid=''
+  exit "$command_status"
+}
+
+restart_runtime() {
+  require_user_systemd
+  require_command curl
+  require_command ss
+  endpoint_url >/dev/null
+  router_start_timeout_seconds >/dev/null
+  acquire_session_lock \
+    "another lifecycle operation or run session is active; restart is refused to preserve runtime ownership"
+
+  if ! systemctl --user is-active --quiet "$TARGET_UNIT"; then
+    port_has_listener && fail "configured port is already occupied by another listener"
+  fi
+
+  systemctl --user restart "$TARGET_UNIT"
+  if ! wait_for_router; then
+    stop_target_after_failure "after restart readiness failed" || true
+    fail "router did not become healthy at $(health_url)"
+  fi
+  printf 'Driftless-NoMore404 is ready at %s\n' "$(endpoint_url)"
+}
+
+command_name="${1:-help}"
+shift || true
+
+case "$command_name" in
+  start) start_runtime ;;
+  stop) stop_runtime ;;
+  restart) restart_runtime ;;
+  status)
+    require_user_systemd
+    systemctl --user status --no-pager "$TARGET_UNIT" "$ROUTER_UNIT"
+    ;;
+  logs)
+    require_user_systemd
+    exec journalctl --user \
+      --unit "$ROUTER_UNIT" \
+      --unit "$WATCH_SERVICE_UNIT" \
+      --follow
+    ;;
+  setup)
+    (( $# == 0 )) || fail "setup does not accept arguments"
+    setup_configuration
+    ;;
+  install-runtime)
+    (( $# == 0 )) || fail "install-runtime does not accept arguments"
+    install_pinned_runtime
+    ;;
+  register-hermes)
+    (( $# == 0 )) || fail "register-hermes does not accept arguments"
+    register_hermes_models
+    ;;
+  doctor) doctor ;;
+  endpoint) endpoint_url; printf '\n' ;;
+  run) run_with_runtime "$@" ;;
+  help | -h | --help) usage ;;
+  *) usage >&2; fail "unknown command: $command_name" ;;
+esac

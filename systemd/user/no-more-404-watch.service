@@ -1,0 +1,12 @@
+[Unit]
+Description=Driftless-NoMore404 router health watchdog
+Documentation=https://github.com/DriftlessWriting/Driftless-NoMore404
+After=no-more-404.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/libexec/no-more-404/no-more-404-health
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+UMask=0077
