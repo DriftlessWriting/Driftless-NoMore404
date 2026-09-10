@@ -43,6 +43,8 @@ patch, or redistribute either upstream codebase, their binaries, model weights,
 or brand assets. It is not affiliated with, sponsored by, endorsed by, or
 supported by Nous Research or ggml-org.
 
+Install and use NoMore404 at your own risk.
+
 ## Where it fits
 
 Current Hermes Desktop builds include an official **Local Models** flow that can
