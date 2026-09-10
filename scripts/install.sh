@@ -198,11 +198,9 @@ fi
 run systemctl --user daemon-reload
 
 printf '\nInstalled without starting or enabling any service.\n'
-printf '1. Choose and download a GGUF model with at least 64K context.\n'
-printf '2. Run: %s setup\n' "$bin_dir/no-more-404"
-printf '   Setup sizes and tests your model, adds it to Hermes if approved, and offers automatic Desktop following.\n'
-printf '3. Run: %s doctor\n' "$bin_dir/no-more-404"
-printf '4. Open Hermes Desktop normally, or run "%s start" for CLI-only use.\n' "$bin_dir/no-more-404"
+printf 'The public one-command bootstrap normally continues into first-time setup automatically.\n'
+printf 'For a direct source-tree install, run: %s setup\n' "$bin_dir/no-more-404"
+printf 'Setup selects, sizes, and tests your model, wires it into Hermes when approved, and offers automatic Desktop following.\n'
 printf 'Setup guide: https://github.com/DriftlessWriting/Driftless-NoMore404/blob/v%s/docs/QUICKSTART.md\n' \
   "$package_version"
 case ":$PATH:" in

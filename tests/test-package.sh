@@ -62,6 +62,7 @@ fi
 "$repo_root/tests/test-hermes-desktop-integration.sh"
 "$repo_root/tests/test-install.sh"
 "$repo_root/tests/test-bootstrap-install.sh"
+"$repo_root/tests/test-one-command-install.sh"
 
 grep -Fxq 'Restart=on-failure' systemd/user/no-more-404-router.service
 grep -Fxq 'StartLimitIntervalSec=300' systemd/user/no-more-404-router.service

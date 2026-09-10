@@ -41,21 +41,34 @@ to own the same llama.cpp process or compete for the same model load.
 
 ## Install in one command
 
-On a supported Linux desktop, this installs the `1.2.1` package for the current
-user without `sudo` and without starting or enabling anything:
+On a supported Linux desktop, this one command installs the `1.2.2` package for
+the current user and continues directly into guided model selection and Hermes
+integration. Have Hermes and at least one chosen GGUF file installed first. No
+`sudo` or AI helper is required:
 
 ```bash
-bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.1/install.sh | bash'
+bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.2/install.sh | bash'
 ```
 
 The bootstrap downloads the tagged source into a private temporary directory,
 runs the same auditable installer included in this repository, and removes the
-temporary copy afterward. The bootstrap itself does not start services or
-install Hermes, GPU drivers, or model files. During the separate guided setup,
-NoMore404 can use an existing compatible `llama-server` or, with the user's
-explicit choice, download a pinned official llama.cpp Linux runtime and verify
-its SHA-256 digest. The [Quickstart](docs/QUICKSTART.md) walks through this
-without assuming prior Linux or local-model experience.
+temporary copy afterward. On a fresh installation, that same command then:
+
+1. finds a compatible `llama-server` or offers the checksum-verified official
+   Linux runtime;
+2. opens a native file window when `kdialog` or `zenity` is available, with a
+   drag-and-drop or pasted-path fallback, so the user can select their GGUF;
+3. fits and locally tests the chosen model, using its filename as the default
+   name shown in Hermes;
+4. offers to register it under **NoMore404 Local** and enable automatic Hermes
+   Desktop following, with Enter accepting both normal defaults; and
+5. runs `doctor` before reporting that setup is ready.
+
+It does not install or launch Hermes, install GPU drivers, download a model, or
+change the model Hermes is currently using. The [Quickstart](docs/QUICKSTART.md)
+walks through the prompts without assuming prior Linux or local-model
+experience. Existing configuration is preserved and first-time setup is not
+repeated during an upgrade.
 
 Running code directly from the internet is a trust decision. To inspect the
 small bootstrap before running it:
@@ -63,7 +76,7 @@ small bootstrap before running it:
 ```bash
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
   --output no-more-404-install.sh \
-  https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.1/install.sh
+  https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.2/install.sh
 less no-more-404-install.sh
 bash no-more-404-install.sh
 ```
@@ -125,10 +138,10 @@ bash no-more-404-install.sh
 - It does not silently change Hermes configuration or switch Hermes's current
   or default model. The optional `register-hermes` command uses Hermes's own
   configuration CLI to add or update only the named `NoMore404 Local` provider.
-- The installer does not enable anything at login. Guided setup enables the
-  lightweight Hermes follower only after a separate explicit yes/no choice;
-  the model runtime itself remains disabled and starts only with Hermes or an
-  explicit NoMore404 command.
+- The package-copying stage does not enable anything at login. The same
+  one-command first-run flow enables the lightweight Hermes follower only
+  after its explicit yes/no prompt; the model runtime itself remains disabled
+  and starts only with Hermes or an explicit NoMore404 command.
 - It is not a full watchdog. The health timer only acts while the runtime is
   active, probes the router's `/health` endpoint, and restarts the target after
   a bounded number of consecutive failures. It does not judge whether a loaded
@@ -151,7 +164,7 @@ Native Windows and macOS are not supported by this package. WSL requires a
 working systemd user session and remains an environment-specific setup.
 
 The package is distribution-independent within that boundary; it does not
-depend on CachyOS or an Arch package manager. The `1.2.1` package checks pass
+depend on CachyOS or an Arch package manager. The `1.2.2` package checks pass
 on the following environments:
 
 | Environment | Validation |
@@ -218,29 +231,31 @@ them:
 ./scripts/install.sh --upgrade
 ```
 
-## Choose a model and configure the runtime
+## What the one command configures
 
-For a first installation, run the guided setup. It finds `llama-server` when it
-is already on `PATH`. If none is found, pressing Enter explicitly installs the
-pinned official runtime for the current user. Setup then asks for the user's
-GGUF and a picker name and, when Hermes is installed, one separate yes/no
-question about adding that name to Hermes Desktop's picker. It then asks one
-more clear question about making the runtime automatically follow Hermes
-Desktop sessions:
+On a fresh installation, the public install command continues into guided
+setup automatically. It finds `llama-server` when already available. If none is
+found, pressing Enter explicitly installs the pinned official runtime for the
+current user. A native file window opens when available; otherwise the user can
+drag their GGUF into the terminal or paste its path. The filename becomes the
+suggested picker name, which the user can accept or replace.
+
+If installation was deliberately run with `--no-setup`, or setup was
+interrupted, resume it with:
 
 ```bash
 ~/.local/bin/no-more-404 setup
 ```
 
-It temporarily loads the selected model, lets llama.cpp fit the largest context
+Setup temporarily loads the selected model, lets llama.cpp fit the largest context
 that the current hardware can support without crossing the 64K floor, checks
 the local chat endpoint, unloads the model, and only then writes private
 configuration. The model test does not start a persistent service or Hermes
-process. If you approve the picker step, setup registers the alias and measured
-context under `NoMore404 Local` without switching Hermes's current or default
-model. If you approve automatic Desktop following, setup enables a tiny user
-service which waits without loading a model; when Hermes is already open, it
-starts the configured runtime immediately.
+process. Pressing Enter at the two integration prompts registers the alias and
+measured context under `NoMore404 Local` without switching Hermes's current or
+default model, then enables a tiny user service which waits without loading a
+model. When Hermes is already open, that follower starts the configured runtime
+immediately. The one-command installer finishes by running `doctor`.
 
 Add each additional user-chosen GGUF through the same sizing and local test:
 

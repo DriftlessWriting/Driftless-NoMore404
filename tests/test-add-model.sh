@@ -7,6 +7,7 @@ test_dir="$(mktemp -d)"
 trap 'rm -rf -- "$test_dir"' EXIT
 
 fake_bin="$test_dir/bin"
+test_home="$test_dir/home"
 config_home="$test_dir/config"
 runtime_dir="$test_dir/runtime"
 server_state="$test_dir/server-active"
@@ -15,7 +16,7 @@ server_capture="$test_dir/server-arguments"
 fit_capture="$test_dir/fit-arguments"
 existing_model="$test_dir/existing.gguf"
 added_model="$test_dir/another model.gguf"
-mkdir -p "$fake_bin" "$config_home/no-more-404" "$runtime_dir"
+mkdir -p "$fake_bin" "$test_home" "$config_home/no-more-404" "$runtime_dir"
 printf 'existing model fixture\n' >"$existing_model"
 printf 'new model fixture\n' >"$added_model"
 
@@ -162,6 +163,7 @@ chmod 0600 \
   "$config_home/no-more-404/models.ini"
 
 export PATH="$fake_bin:/usr/bin:/bin"
+export HOME="$test_home"
 export XDG_CONFIG_HOME="$config_home"
 export XDG_RUNTIME_DIR="$runtime_dir"
 export FAKE_SERVER_STATE="$server_state"

@@ -223,7 +223,8 @@ systemd manager.
 
 - [ ] `./scripts/install.sh --dry-run` reports only package-owned user paths and
       changes nothing.
-- [ ] A normal install does not start or enable a service.
+- [ ] `./scripts/install.sh` does not start or enable a service; the public
+      bootstrap enters setup only for untouched first-run configuration.
 - [ ] Installation creates private configuration/state directories and mode
       `0600` configuration files.
 - [ ] Installation refuses to overwrite changed managed files without the
@@ -275,7 +276,8 @@ removal, Docker pruning, or deletion based only on a shared resource name.
       any project-owned downloadable artifacts.
 - [ ] The documented one-command bootstrap works anonymously from the exact
       release tag, installs no unreviewed files, requests no elevated
-      privileges, and starts or enables no service.
+      privileges, reconnects prompts safely to the terminal, and enables only
+      the explicitly approved Desktop follower after the model test passes.
 
 Visibility check before the release decision:
 

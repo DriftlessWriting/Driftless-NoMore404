@@ -65,17 +65,25 @@ different `llama-server`, its own dependencies may differ.
 
 ## Install NoMore404
 
-Copy and paste this entire command:
+Before continuing, install Hermes and download at least one GGUF model of your
+choice. The installer asks you to select that file immediately. Then copy and
+paste this entire command:
 
 ```bash
-bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.1/install.sh | bash'
+bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.2/install.sh | bash'
 ```
 
 It downloads the tagged source temporarily, installs the user-owned commands
-and systemd units, and then removes the temporary source. It does not start or
-enable a service. If the final message says that `~/.local/bin` is not in your
-`PATH`, use the full command path it prints until you open a new terminal or
-add that directory to your shell configuration.
+and systemd units, and continues directly into setup in the same terminal. On
+KDE or GNOME it opens a file-selection window when `kdialog` or `zenity` is
+available. Otherwise, drag the GGUF file into the terminal or paste its path.
+Pressing Enter accepts the detected or verified llama.cpp runtime, the model
+filename as its Hermes label, picker registration, and automatic Desktop
+following. The command then runs `doctor` and removes the temporary source.
+
+NoMore404 does not launch Hermes or change its currently selected model. When
+the command says **Ready**, open Hermes Desktop, choose **Refresh models**, and
+select the name you just configured under **NoMore404 Local**.
 
 ## What you must provide once
 
@@ -106,18 +114,19 @@ llama.cpp's [official installation](https://github.com/ggml-org/llama.cpp/blob/m
 and [build](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md)
 instructions, then enter that `llama-server` path during setup.
 
-## Fit and configure your chosen model
+## What happens during the same command
 
-Run the guided initial setup:
+The installer starts guided setup automatically. If it was interrupted, resume
+it with:
 
 ```bash
 ~/.local/bin/no-more-404 setup
 ```
 
 If `llama-server` is found automatically, press Enter to accept it. If none is
-found, press Enter to install the verified pinned runtime. Then enter the path
-to your chosen GGUF and either accept the neutral `local-main` label or type
-your own picker label.
+found, press Enter to install the verified pinned runtime. Select the chosen
+GGUF in the file window or provide its path, then accept the filename-derived
+Hermes label or type your own neutral picker label.
 
 Before loading model weights, setup asks the compatible `llama-fit-params`
 companion to read the chosen GGUF metadata and project whether it fits. The
@@ -144,14 +153,14 @@ applications first if you want sizing to reflect the machine's normal available
 capacity. A successful projection reduces risk but cannot guarantee that memory
 will still be free when the later load occurs.
 
-The suggested alias, `local-main`, is only a label; it does not choose or imply
-a particular model. If Hermes is installed, setup separately asks whether to
-add that alias and measured context under **NoMore404 Local**. It never switches
+The suggested alias comes from the selected filename only; it does not choose
+or imply a preferred model. If Hermes is installed, setup asks whether to add
+that alias and measured context under **NoMore404 Local**. It never switches
 Hermes's current or default model. Setup then asks whether NoMore404 should
-automatically follow Hermes Desktop. Press Enter or answer `yes` for the normal
-Desktop experience. A lightweight user service will wait without loading a
-model, start the runtime when you open Hermes, and stop its owned runtime when
-Hermes closes. It never starts or changes Hermes.
+automatically follow Hermes Desktop. Press Enter or answer `yes` at both prompts
+for the normal Desktop experience. A lightweight user service waits without
+loading a model, starts the runtime when you open Hermes, and stops its owned
+runtime when Hermes closes. It never starts or changes Hermes.
 
 ## Add more models to the picker
 
