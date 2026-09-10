@@ -14,7 +14,9 @@ Before proposing a change:
 2. Run `./scripts/pre-public-audit.sh` from a clean Git worktree if the required
    scanners are installed.
 3. Confirm listeners remain loopback-only.
-4. Confirm installation does not start or enable services automatically.
+4. Confirm the lower-level package installer does not start or enable services,
+   and the public bootstrap enters setup only for untouched first-run
+   configuration.
 5. Confirm automatic Desktop following is enabled only after an explicit setup
    choice or command and never launches Hermes.
 6. Explain any change to process ownership, restart behaviour, or file removal.

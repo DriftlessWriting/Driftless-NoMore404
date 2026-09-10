@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.2 - 2026-09-10
+
+- Made the public one-command installer continue directly into first-time
+  guided setup instead of requiring a second command.
+- Reconnected interactive setup to the controlling terminal when the
+  bootstrap is executed through `curl | bash`.
+- Added an optional native KDE or GNOME file-selection window for choosing a
+  GGUF, with drag-and-drop or pasted-path input as the dependency-free
+  fallback.
+- Used the selected GGUF filename as the default Hermes picker label while
+  preserving the user's ability to enter any neutral custom name.
+- Added fallback discovery for Hermes's normal user-local CLI location when
+  `~/.local/bin` is not yet present in the shell's `PATH`.
+- Made a successful first-time bootstrap run `doctor` before reporting that
+  the model is ready to select in Hermes.
+- Treated an intentionally stopped on-demand router as a healthy `doctor`
+  result instead of a warning.
+
 ## 1.2.1 - 2026-09-10
 
 - Made safe picker-driven model switching an enforced package contract:

@@ -43,11 +43,14 @@ issue does not grant permission to disclose it before that agreement.
 ## Security model
 
 Driftless-NoMore404 installs a user-level systemd target and an on-demand local
-model router. The installer deliberately does not start or enable the runtime.
-The project supplies wrappers, example configuration, and service definitions;
-it does not contain Hermes Desktop, llama.cpp binaries, model weights, prompts,
-or user data. With explicit user action, setup can download a fixed official
-llama.cpp release asset directly from GitHub into the user's data directory.
+model router. The lower-level package installer deliberately does not start or
+enable the runtime. On a fresh installation, the public bootstrap continues
+into interactive setup, which temporarily tests the selected model and asks
+before registering it with Hermes or enabling the Desktop follower. The project
+supplies wrappers, example configuration, and service definitions; it does not
+contain Hermes Desktop, llama.cpp binaries, model weights, prompts, or user
+data. With explicit user action, setup can download a fixed official llama.cpp
+release asset directly from GitHub into the user's data directory.
 
 The supported network boundary is loopback only:
 
@@ -75,6 +78,10 @@ user-level installer shipped in that tag. It never requests elevated
 privileges. Piping any network response into a shell still depends on the
 integrity of the GitHub account, release tag, TLS connection, and local
 machine, so the README also provides an inspect-before-running path.
+Because the script itself arrives on standard input, first-time setup reconnects
+only its interactive answers to the controlling terminal. Model paths and
+prompt answers are consumed locally by the installed CLI and are not sent to
+GitHub or another remote service.
 
 Guided setup separately asks whether to enable automatic Hermes Desktop
 following. If approved, it enables a lightweight user service which waits for

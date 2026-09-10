@@ -746,13 +746,15 @@ run_model_probe() {
 }
 
 setup_configuration() {
-  local binary_input binary_path detected_binary model_input model_path model_name setup_path
+  local binary_input binary_path detected_binary model_path model_name setup_path
+  local suggested_model_name
   local escaped_binary escaped_preset runtime_temporary model_temporary line configured_port
   local missing_flags
 
   require_command grep
   require_command mktemp
   require_command realpath
+  require_command sed
   require_command curl
   require_command ss
   require_command stat
@@ -803,22 +805,13 @@ setup_configuration() {
     printf 'That is not an executable file. Try again.\n' >&2
   done
 
-  while true; do
-    printf 'Path to one GGUF model file: '
-    IFS= read -r model_input || fail "setup ended before a model path was entered"
-    if [[ "$model_input" == \~/* ]]; then
-      model_input="$HOME/${model_input:2}"
-    fi
-    model_path="$(realpath -e -- "$model_input" 2>/dev/null || true)"
-    if [[ -f "$model_path" && -r "$model_path" && -s "$model_path" ]]; then
-      break
-    fi
-    printf 'That is not a readable, non-empty model file. Try again.\n' >&2
-  done
+  model_path="$(choose_gguf_model 'Path to one GGUF model file')"
+  suggested_model_name="$(suggest_model_alias "$model_path")"
 
-  printf 'Picker name [local-main] (ordinary spaces are allowed): '
+  printf 'Name shown in Hermes [%s] (ordinary spaces are allowed): ' \
+    "$suggested_model_name"
   IFS= read -r model_name || fail "setup ended before the model name was confirmed"
-  model_name="$(trim_whitespace "${model_name:-local-main}")"
+  model_name="$(trim_whitespace "${model_name:-$suggested_model_name}")"
   validate_model_alias "$model_name"
 
   for setup_path in "$binary_path" "$model_path" "$MODEL_FILE"; do
@@ -882,7 +875,7 @@ setup_configuration() {
   offer_hermes_registration
   offer_hermes_desktop_integration
   printf '\n'
-  printf 'Next, run: %s doctor\n' "$0"
+  printf 'Verify the installation at any time with: %s doctor\n' "$0"
   printf 'To fit and add another chosen GGUF later, run: %s add-model\n' "$0"
 }
 
@@ -891,6 +884,72 @@ trim_whitespace() {
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
   printf '%s' "$value"
+}
+
+normalise_selected_path() {
+  local value
+  value="$(trim_whitespace "$1")"
+  if [[ "$value" == \"*\" && "$value" == *\" && ${#value} -ge 2 ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "$value" == \'*\' && "$value" == *\' && ${#value} -ge 2 ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  if [[ "$value" == \~/* ]]; then
+    value="$HOME/${value:2}"
+  fi
+  printf '%s' "$value"
+}
+
+choose_gguf_model() {
+  local prompt_label="$1"
+  local selected='' resolved=''
+
+  if [[ -t 0 && ( -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ) ]]; then
+    if command -v kdialog >/dev/null 2>&1; then
+      printf 'Opening a file window so you can select your GGUF model...\n' >&2
+      selected="$(kdialog --getopenfilename "$HOME" \
+        '*.gguf *.GGUF|GGUF model files' 2>/dev/null || true)"
+    elif command -v zenity >/dev/null 2>&1; then
+      printf 'Opening a file window so you can select your GGUF model...\n' >&2
+      selected="$(zenity --file-selection \
+        --title='Select your local GGUF model' \
+        --file-filter='GGUF model files | *.gguf *.GGUF' \
+        --file-filter='All files | *' 2>/dev/null || true)"
+    fi
+  fi
+
+  while true; do
+    if [[ -z "$selected" ]]; then
+      printf '%s (you can drag the file into this terminal): ' "$prompt_label" >&2
+      IFS= read -r selected || fail "model selection ended before a path was entered"
+    fi
+    selected="$(normalise_selected_path "$selected")"
+    resolved="$(realpath -e -- "$selected" 2>/dev/null || true)"
+    if [[ -f "$resolved" && -r "$resolved" && -s "$resolved" ]]; then
+      printf '%s' "$resolved"
+      return 0
+    fi
+    printf 'That is not a readable, non-empty model file. Try again.\n' >&2
+    selected=''
+  done
+}
+
+suggest_model_alias() {
+  local model_path="$1"
+  local suggestion safe_pattern='^[A-Za-z0-9][A-Za-z0-9._ -]*$'
+
+  suggestion="${model_path##*/}"
+  if [[ "${suggestion,,}" == *.gguf ]]; then
+    suggestion="${suggestion:0:${#suggestion}-5}"
+  fi
+  suggestion="$(printf '%s' "$suggestion" | sed -E \
+    's/[^A-Za-z0-9._ -]+/-/g; s/^[^A-Za-z0-9]+//; s/[[:space:]]+$//')"
+  suggestion="${suggestion:0:80}"
+  suggestion="$(trim_whitespace "$suggestion")"
+  if [[ -z "$suggestion" || ! "$suggestion" =~ $safe_pattern || "$suggestion" == *' ' ]]; then
+    suggestion=local-main
+  fi
+  printf '%s' "$suggestion"
 }
 
 active_configuration_has_placeholder() {
@@ -1144,6 +1203,23 @@ hermes_config_get() {
   "$hermes_binary" config get "$key" 2>/dev/null || true
 }
 
+find_hermes_cli() {
+  local candidate
+
+  candidate="$(command -v hermes 2>/dev/null || true)"
+  if [[ -n "$candidate" && -f "$candidate" && -x "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  candidate="$HOME/.local/bin/hermes"
+  if [[ -f "$candidate" && -x "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
 escape_hermes_config_segment() {
   local value="$1"
   value="${value//\\/\\\\}"
@@ -1162,7 +1238,7 @@ register_hermes_models() {
   [[ -f "$MODEL_FILE" && ! -L "$MODEL_FILE" && -r "$MODEL_FILE" ]] ||
     fail "Hermes registration requires the readable installed model preset: $MODEL_FILE"
 
-  hermes_binary="$(command -v hermes 2>/dev/null || true)"
+  hermes_binary="$(find_hermes_cli || true)"
   [[ -n "$hermes_binary" ]] ||
     fail "Hermes CLI was not found; install Hermes, then run '$0 register-hermes'"
   "$hermes_binary" config set --help >/dev/null 2>&1 ||
@@ -1240,9 +1316,10 @@ register_hermes_models() {
 }
 
 offer_hermes_registration() {
-  local answer
+  local answer hermes_binary
 
-  if ! command -v hermes >/dev/null 2>&1; then
+  hermes_binary="$(find_hermes_cli || true)"
+  if [[ -z "$hermes_binary" ]]; then
     printf 'Hermes was not found. After installing it, run: %s register-hermes\n' "$0"
     return
   fi
@@ -1261,13 +1338,14 @@ offer_hermes_registration() {
 }
 
 add_model() {
-  local binary_path preset_path model_input model_path model_name setup_path
+  local binary_path preset_path model_path model_name setup_path suggested_model_name
   local configured_port missing_flags model_temporary row added_row=false
 
   require_user_systemd
   require_command grep
   require_command mktemp
   require_command realpath
+  require_command sed
   require_command curl
   require_command ss
   require_command stat
@@ -1294,22 +1372,13 @@ add_model() {
     fail "close Hermes Desktop or stop NoMore404 before testing another model; the active runtime was not changed"
   fi
 
-  while true; do
-    printf 'Path to another GGUF model file: '
-    IFS= read -r model_input || fail "add-model ended before a model path was entered"
-    if [[ "$model_input" == \~/* ]]; then
-      model_input="$HOME/${model_input:2}"
-    fi
-    model_path="$(realpath -e -- "$model_input" 2>/dev/null || true)"
-    if [[ -f "$model_path" && -r "$model_path" && -s "$model_path" ]]; then
-      break
-    fi
-    printf 'That is not a readable, non-empty model file. Try again.\n' >&2
-  done
+  model_path="$(choose_gguf_model 'Path to another GGUF model file')"
+  suggested_model_name="$(suggest_model_alias "$model_path")"
 
-  printf 'Picker name for this model: '
+  printf 'Name shown in Hermes [%s] (ordinary spaces are allowed): ' \
+    "$suggested_model_name"
   IFS= read -r model_name || fail "add-model ended before the model name was entered"
-  model_name="$(trim_whitespace "$model_name")"
+  model_name="$(trim_whitespace "${model_name:-$suggested_model_name}")"
   validate_model_alias "$model_name"
   model_alias_exists "$model_name" "$MODEL_FILE" &&
     fail "model name '$model_name' is already configured; the existing entry was not changed"
@@ -1816,7 +1885,7 @@ doctor() {
     if [[ "$target_active" == true ]]; then
       check_fail "runtime target is active but the router service is inactive"
     else
-      check_warn "router is currently inactive because the runtime target is stopped"
+      check_ok "router is inactive as expected until Hermes or an explicit start requests it"
     fi
   fi
 

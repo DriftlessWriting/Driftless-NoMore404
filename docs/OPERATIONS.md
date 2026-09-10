@@ -12,6 +12,10 @@ creates private example configuration files only when they do not already
 exist. It does not enable or start the runtime. A tagged release can also be
 installed through the repository-root bootstrap documented in the README; it
 downloads into a private temporary directory and invokes this same installer.
+For untouched first-run configuration, the public bootstrap then reconnects to
+the user's terminal, runs guided setup, and executes `doctor`. Use the
+bootstrap's `--no-setup` option when deliberately testing package installation
+alone.
 
 For untouched example configuration, run:
 
@@ -32,7 +36,9 @@ the model alias and measured context to Hermes Desktop's picker; that separate
 step is optional and does not switch Hermes's current or default model. Setup
 then offers to enable the lightweight automatic Desktop follower. When
 approved, it waits for user-started native Hermes sessions and owns the runtime
-only for their lifetime; it never starts or modifies Hermes.
+only for their lifetime; it never starts or modifies Hermes. On a graphical
+desktop, setup uses `kdialog` or `zenity` when available to select the GGUF;
+drag-and-drop or a pasted path remains the dependency-free fallback.
 
 Add another user-selected GGUF without hand-editing the preset:
 
