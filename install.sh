@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly package_version='1.0.0'
+readonly package_version='1.2.1'
 readonly repository='DriftlessWriting/Driftless-NoMore404'
 readonly archive_url="https://github.com/$repository/archive/refs/tags/v$package_version.tar.gz"
 

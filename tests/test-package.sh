@@ -9,6 +9,7 @@ scripts=(
   install.sh
   bin/no-more-404
   bin/no-more-404-health
+  bin/no-more-404-hermes-follower
   bin/no-more-404-hermes-session
   bin/no-more-404-router
   scripts/*.sh
@@ -53,9 +54,12 @@ fi
 "$repo_root/tests/test-health.sh"
 "$repo_root/tests/test-doctor.sh"
 "$repo_root/tests/test-setup.sh"
+"$repo_root/tests/test-add-model.sh"
 "$repo_root/tests/test-runtime-install.sh"
 "$repo_root/tests/test-hermes-registration.sh"
 "$repo_root/tests/test-hermes-session.sh"
+"$repo_root/tests/test-hermes-follower.sh"
+"$repo_root/tests/test-hermes-desktop-integration.sh"
 "$repo_root/tests/test-install.sh"
 "$repo_root/tests/test-bootstrap-install.sh"
 
@@ -64,8 +68,11 @@ grep -Fxq 'StartLimitIntervalSec=300' systemd/user/no-more-404-router.service
 grep -Fxq 'StartLimitBurst=5' systemd/user/no-more-404-router.service
 grep -Fxq 'RestartPreventExitStatus=64 66 78' systemd/user/no-more-404-router.service
 grep -Fxq 'PartOf=no-more-404.target' systemd/user/no-more-404-watch.timer
+! grep -Fxq 'After=no-more-404.target' systemd/user/no-more-404-watch.timer
 grep -Fxq 'OnActiveSec=2min' systemd/user/no-more-404-watch.timer
 grep -Fxq 'OnUnitActiveSec=2min' systemd/user/no-more-404-watch.timer
+grep -Fxq 'WantedBy=default.target' systemd/user/no-more-404-hermes-follower.service
+grep -Fq 'integrate-hermes-desktop' docs/QUICKSTART.md
 grep -Fq 'gitleaks dir --no-banner --redact .' scripts/pre-public-audit.sh
 grep -Fq 'gitleaks git --no-banner --redact .' scripts/pre-public-audit.sh
 grep -Fq 'rg --hidden --no-ignore' scripts/pre-public-audit.sh
@@ -94,11 +101,14 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     systemd/user/no-more-404-router.service >"$verify_dir/no-more-404-router.service"
   sed 's#ExecStart=%h/.local/libexec/no-more-404/no-more-404-health#ExecStart=/bin/true#' \
     systemd/user/no-more-404-watch.service >"$verify_dir/no-more-404-watch.service"
+  sed 's#ExecStart=%h/.local/libexec/no-more-404/no-more-404-hermes-follower#ExecStart=/bin/true#' \
+    systemd/user/no-more-404-hermes-follower.service >"$verify_dir/no-more-404-hermes-follower.service"
   cp systemd/user/no-more-404.target "$verify_dir/no-more-404.target"
   cp systemd/user/no-more-404-watch.timer "$verify_dir/no-more-404-watch.timer"
   systemd-analyze verify \
     "$verify_dir/no-more-404-router.service" \
     "$verify_dir/no-more-404-watch.service" \
+    "$verify_dir/no-more-404-hermes-follower.service" \
     "$verify_dir/no-more-404.target" \
     "$verify_dir/no-more-404-watch.timer"
   printf 'systemd unit verification passed\n'

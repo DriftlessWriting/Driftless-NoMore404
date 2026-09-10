@@ -66,7 +66,8 @@ for unit in \
   no-more-404.target \
   no-more-404-router.service \
   no-more-404-watch.service \
-  no-more-404-watch.timer; do
+  no-more-404-watch.timer \
+  no-more-404-hermes-follower.service; do
   : >"$config_home/systemd/user/$unit"
 done
 
@@ -114,6 +115,8 @@ write_good_preset
 doctor_output="$($cli doctor)"
 grep -Fq 'all configured model and projector paths are readable absolute files' <<<"$doctor_output"
 grep -Fq "all configured models meet Hermes's 64K minimum context" <<<"$doctor_output"
+grep -Fq 'MAX_MODELS is one, so model changes use one safe replacement slot' \
+  <<<"$doctor_output"
 grep -Fq 'Doctor finished with 0 failure(s)' <<<"$doctor_output"
 
 set +e
@@ -134,6 +137,16 @@ threshold_status=$?
 set -e
 [[ "$threshold_status" != 0 ]]
 grep -Fq 'HEALTH_FAILURES_REQUIRED must be an integer of at least two' <<<"$threshold_output"
+
+write_good_config
+sed -i 's/MAX_MODELS=1/MAX_MODELS=2/' "$config_home/no-more-404/runtime.env"
+set +e
+resident_output="$($cli doctor 2>&1)"
+resident_status=$?
+set -e
+[[ "$resident_status" != 0 ]]
+grep -Fq 'MAX_MODELS must be exactly one so the previous model is replaced during a switch' \
+  <<<"$resident_output"
 
 write_good_config
 sed -i "s#model = $model_file#model = $test_dir/missing.gguf#" \

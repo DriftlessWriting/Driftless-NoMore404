@@ -90,7 +90,8 @@ history, and repeat every scan before pushing again.
 - [ ] No model weights, model cache, private preset, or model-derived metadata
       is tracked or distributed.
 - [ ] No model is configured to preload at service start.
-- [ ] At most one model is resident by default, and the documented idle policy
+- [ ] Exactly one model can be resident, a busy worker is allowed to finish
+      before a picker-requested replacement, and the documented idle policy
       releases it without requiring a machine restart.
 - [ ] The package does not name, rank, download, or favour any model; every
       picker alias comes only from the user's own preset. Memory-fit failure may
@@ -208,6 +209,12 @@ in a disposable user account or virtual machine.
       Electron sandbox helper owned by `root:root` with mode `4755`.
 - [ ] The adapter refuses unsafe sandbox paths before starting either Hermes or
       the local-model runtime and never uses `--no-sandbox` as a fallback.
+- [ ] The automatic Hermes follower inspects only same-user process metadata,
+      never launches or modifies Hermes, and ignores Electron helper processes.
+- [ ] The follower acquires the lifecycle lock, refuses a preoccupied port,
+      waits for router health, and stops only a target it started.
+- [ ] Automatic following is enabled only after the user's explicit setup
+      choice or `integrate-hermes-desktop` command and has a tested disable path.
 
 ## 7. Install, upgrade, and uninstall round trip
 
@@ -224,11 +231,12 @@ systemd manager.
 - [ ] Upgrade backs up changed managed files before replacement.
 - [ ] Re-running install and upgrade is deterministic and does not duplicate
       state.
-- [ ] The install manifest contains only the eight package-managed executable
+- [ ] The install manifest contains only the ten package-managed executable
       and unit files, with their hashes.
 - [ ] `./scripts/uninstall.sh --dry-run` changes nothing.
-- [ ] Uninstall stops the package target, removes only unchanged manifest-owned
-      files, and preserves locally modified files.
+- [ ] Uninstall disables the automatic Desktop follower, stops the package
+      target, removes only unchanged manifest-owned files, and preserves
+      locally modified files.
 - [ ] Configuration, model presets, models, caches, state, and backups survive
       uninstall by default.
 - [ ] Uninstall preserves the externally owned Hermes provider entry and the

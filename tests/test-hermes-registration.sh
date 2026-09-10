@@ -65,7 +65,7 @@ ctx-size = 65536
 model = /unused/model-a.gguf
 load-on-startup = false
 
-[user-choice]
+[User Choice]
 model = /unused/user-choice.gguf
 ctx-size = 70000
 load-on-startup = false
@@ -104,7 +104,7 @@ grep -Fq "Hermes's current model was not changed." <<<"$registration_output"
 [[ "$(last_value providers.no-more-404.transport)" == 'chat_completions' ]]
 [[ "$(last_value providers.no-more-404.discover_models)" == false ]]
 [[ "$(last_value 'providers.no-more-404.models.user\.model-a.context_length')" == 65536 ]]
-[[ "$(last_value 'providers.no-more-404.models.user-choice.context_length')" == 70000 ]]
+[[ "$(last_value 'providers.no-more-404.models.User Choice.context_length')" == 70000 ]]
 [[ "$(last_value model.default)" == cloud-model ]]
 [[ "$(last_value model.provider)" == openrouter ]]
 ! awk -F '\t' '$1 == "model.default" || $1 == "model.provider" { found = 1 } END { exit found ? 0 : 1 }' \
@@ -138,7 +138,7 @@ grep -Fq 'ctx-size must be at least 64000 for Hermes' <<<"$context_output"
 
 sed -i 's/ctx-size = 32000/ctx-size = 65536/' \
   "$config_home/no-more-404/models.ini"
-sed -i 's/\[user-choice\]/[user choice]/' \
+sed -i 's#\[User Choice\]#[user/choice]#' \
   "$config_home/no-more-404/models.ini"
 : >"$write_log"
 set +e
@@ -146,10 +146,10 @@ alias_output="$($cli register-hermes 2>&1)"
 alias_status=$?
 set -e
 [[ "$alias_status" != 0 ]]
-grep -Fq 'uses an unsafe alias' <<<"$alias_output"
+grep -Fq 'model name must be 1-80 characters' <<<"$alias_output"
 [[ ! -s "$write_log" ]]
 
-sed -i 's/\[user choice\]/[user-choice]/' \
+sed -i 's#\[user/choice\]#[User Choice]#' \
   "$config_home/no-more-404/models.ini"
 sed -i 's/ctx-size = 70000/ctx-size = not-a-number/' \
   "$config_home/no-more-404/models.ini"

@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+# Follow a user-started Hermes Desktop process without rewriting Hermes files.
+#
+# This small control-plane process is enabled only after the user explicitly
+# chooses automatic Desktop integration. It never launches Hermes. When it
+# observes the main Hermes Electron process, it starts the NoMore404 target and
+# holds the shared lifecycle lock for that Desktop session. It stops only a
+# target it started itself after the last Hermes main process has disappeared.
+
+readonly EX_CONFIG=78
+readonly TARGET_UNIT="${NO_MORE_404_TARGET_UNIT:-no-more-404.target}"
+readonly ROUTER_UNIT="${NO_MORE_404_ROUTER_UNIT:-no-more-404-router.service}"
+readonly PROC_ROOT="${NO_MORE_404_PROC_ROOT:-/proc}"
+readonly POLL_SECONDS="${NO_MORE_404_HERMES_POLL_SECONDS:-1}"
+readonly ABSENT_CHECKS_REQUIRED="${NO_MORE_404_HERMES_ABSENT_CHECKS_REQUIRED:-2}"
+readonly START_RETRY_SECONDS="${NO_MORE_404_HERMES_START_RETRY_SECONDS:-10}"
+
+runtime_owned=false
+session_lock_fd=''
+stop_requested=false
+failure_notified=false
+
+log() {
+  printf 'no-more-404-hermes-follower: %s\n' "$*" >&2
+}
+
+fail_config() {
+  log "$*"
+  exit "$EX_CONFIG"
+}
+
+positive_number() {
+  [[ "$1" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] &&
+    awk -v value="$1" 'BEGIN { exit !(value > 0) }'
+}
+
+validate_configuration() {
+  [[ "$TARGET_UNIT" =~ ^[A-Za-z0-9_.@:-]+\.target$ ]] ||
+    fail_config "NO_MORE_404_TARGET_UNIT must name one systemd target"
+  [[ "$ROUTER_UNIT" =~ ^[A-Za-z0-9_.@:-]+\.service$ ]] ||
+    fail_config "NO_MORE_404_ROUTER_UNIT must name one systemd service"
+  [[ "$PROC_ROOT" == /* && -d "$PROC_ROOT" ]] ||
+    fail_config "NO_MORE_404_PROC_ROOT must be an absolute directory"
+  positive_number "$POLL_SECONDS" ||
+    fail_config "NO_MORE_404_HERMES_POLL_SECONDS must be greater than zero"
+  [[ "$ABSENT_CHECKS_REQUIRED" =~ ^[0-9]+$ ]] &&
+    (( ABSENT_CHECKS_REQUIRED >= 1 )) ||
+    fail_config "NO_MORE_404_HERMES_ABSENT_CHECKS_REQUIRED must be a positive integer"
+  positive_number "$START_RETRY_SECONDS" ||
+    fail_config "NO_MORE_404_HERMES_START_RETRY_SECONDS must be greater than zero"
+
+  : "${BIND_HOST:=127.0.0.1}"
+  : "${PORT:=55984}"
+  : "${ROUTER_START_TIMEOUT_SECONDS:=20}"
+  case "$BIND_HOST" in
+    127.0.0.1 | ::1) ;;
+    *) fail_config "BIND_HOST must be 127.0.0.1 or ::1" ;;
+  esac
+  [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1024 && PORT <= 65535 )) ||
+    fail_config "PORT must be an integer between 1024 and 65535"
+  [[ "$ROUTER_START_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] &&
+    (( ROUTER_START_TIMEOUT_SECONDS > 0 )) ||
+    fail_config "ROUTER_START_TIMEOUT_SECONDS must be a positive integer"
+
+  command -v awk >/dev/null 2>&1 || fail_config "awk is required"
+  command -v curl >/dev/null 2>&1 || fail_config "curl is required"
+  command -v flock >/dev/null 2>&1 || fail_config "flock is required"
+  command -v grep >/dev/null 2>&1 || fail_config "grep is required"
+  command -v ss >/dev/null 2>&1 || fail_config "ss is required"
+  command -v systemctl >/dev/null 2>&1 || fail_config "systemctl is required"
+  systemctl --user show-environment >/dev/null 2>&1 ||
+    fail_config "the systemd user manager is unavailable"
+  [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -O "$XDG_RUNTIME_DIR" ]] ||
+    fail_config "XDG_RUNTIME_DIR must be an existing directory owned by the current user"
+}
+
+is_main_hermes_process() {
+  local process_directory="$1"
+  local argument command_name first_argument=''
+
+  [[ -d "$process_directory" && -r "$process_directory/comm" &&
+    -r "$process_directory/cmdline" ]] || return 1
+  [[ -O "$process_directory" ]] || return 1
+  IFS= read -r command_name <"$process_directory/comm" || return 1
+  case "$command_name" in
+    Hermes | hermes) ;;
+    *) return 1 ;;
+  esac
+
+  # Electron helpers use the same executable and process name. Only the main
+  # process has no --type= role argument, so a lingering renderer or zygote
+  # cannot keep model services alive after the Desktop session has ended.
+  while IFS= read -r -d '' argument; do
+    [[ -n "$first_argument" ]] || first_argument="$argument"
+    [[ "$argument" == --type=* ]] && return 1
+  done <"$process_directory/cmdline"
+  case "${first_argument##*/}" in
+    Hermes | hermes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+hermes_desktop_running() {
+  local process_directory
+  local -a process_directories=()
+
+  shopt -s nullglob
+  process_directories=("$PROC_ROOT"/[0-9]*)
+  shopt -u nullglob
+  for process_directory in "${process_directories[@]}"; do
+    is_main_hermes_process "$process_directory" && return 0
+  done
+  return 1
+}
+
+health_url() {
+  case "$BIND_HOST" in
+    ::1) printf 'http://[::1]:%s/health' "$PORT" ;;
+    *) printf 'http://%s:%s/health' "$BIND_HOST" "$PORT" ;;
+  esac
+}
+
+port_has_listener() {
+  ss -H -ltn "sport = :$PORT" 2>/dev/null | grep -q .
+}
+
+router_is_ready() {
+  systemctl --user is-active --quiet "$ROUTER_UNIT" &&
+    curl --disable --noproxy '*' --fail --silent --show-error \
+      --max-time 2 "$(health_url)" >/dev/null 2>&1
+}
+
+wait_for_router() {
+  local attempts attempt
+  attempts=$(( ROUTER_START_TIMEOUT_SECONDS * 2 ))
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    router_is_ready && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+release_session_lock() {
+  [[ -n "$session_lock_fd" ]] || return 0
+  flock --unlock "$session_lock_fd" 2>/dev/null || true
+  exec {session_lock_fd}>&-
+  session_lock_fd=''
+}
+
+acquire_session_lock() {
+  local session_lock_file="$XDG_RUNTIME_DIR/no-more-404-session.lock"
+  exec {session_lock_fd}>"$session_lock_file"
+  if ! flock --nonblock "$session_lock_fd"; then
+    exec {session_lock_fd}>&-
+    session_lock_fd=''
+    return 1
+  fi
+}
+
+notify_start_failure() {
+  [[ "$failure_notified" == false ]] || return 0
+  failure_notified=true
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send \
+      --app-name='Driftless-NoMore404' \
+      'NoMore404 could not start' \
+      'Hermes is open, but its local-model runtime is unavailable. Run: no-more-404 status' \
+      >/dev/null 2>&1 || true
+  fi
+}
+
+stop_owned_runtime() {
+  [[ "$runtime_owned" == true ]] || return 0
+  if ! systemctl --user stop "$TARGET_UNIT"; then
+    log "failed to stop owned runtime target: $TARGET_UNIT"
+  else
+    log "Hermes Desktop closed; stopped owned runtime target"
+  fi
+  runtime_owned=false
+  release_session_lock
+}
+
+start_owned_runtime() {
+  systemctl --user is-active --quiet "$TARGET_UNIT" && return 0
+  acquire_session_lock || return 1
+
+  # Recheck after acquiring the lock: another lifecycle command may have
+  # completed between the initial state check and lock acquisition.
+  if systemctl --user is-active --quiet "$TARGET_UNIT"; then
+    release_session_lock
+    return 0
+  fi
+  if port_has_listener; then
+    log "configured port $PORT is already occupied; refusing to start a competing runtime"
+    release_session_lock
+    notify_start_failure
+    return 1
+  fi
+
+  # Mark ownership before systemd starts so cleanup also covers a partially
+  # successful transaction.
+  runtime_owned=true
+  if ! systemctl --user start "$TARGET_UNIT"; then
+    log "failed to start runtime target for Hermes Desktop: $TARGET_UNIT"
+    systemctl --user stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+    runtime_owned=false
+    release_session_lock
+    notify_start_failure
+    return 1
+  fi
+  if ! wait_for_router; then
+    log "runtime target started, but the router did not become healthy at $(health_url)"
+    systemctl --user stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+    runtime_owned=false
+    release_session_lock
+    notify_start_failure
+    return 1
+  fi
+
+  failure_notified=false
+  log "Hermes Desktop detected; runtime is ready at $(health_url)"
+}
+
+request_stop() {
+  stop_requested=true
+}
+
+cleanup() {
+  local cleanup_status=$?
+  trap - EXIT
+  stop_owned_runtime
+  release_session_lock
+  exit "$cleanup_status"
+}
+
+main() {
+  local absent_checks=0
+
+  validate_configuration
+  trap cleanup EXIT
+  trap request_stop INT TERM HUP
+  log "waiting for a user-started Hermes Desktop session"
+
+  while [[ "$stop_requested" == false ]]; do
+    if hermes_desktop_running; then
+      absent_checks=0
+      if [[ "$runtime_owned" == true ]]; then
+        if ! systemctl --user is-active --quiet "$TARGET_UNIT"; then
+          runtime_owned=false
+          release_session_lock
+        fi
+      fi
+      if [[ "$runtime_owned" == false ]] &&
+        ! systemctl --user is-active --quiet "$TARGET_UNIT"; then
+        if ! start_owned_runtime; then
+          sleep "$START_RETRY_SECONDS" || true
+          continue
+        fi
+      fi
+    else
+      absent_checks=$((absent_checks + 1))
+      if (( absent_checks >= ABSENT_CHECKS_REQUIRED )); then
+        stop_owned_runtime
+        failure_notified=false
+        absent_checks="$ABSENT_CHECKS_REQUIRED"
+      fi
+    fi
+    sleep "$POLL_SECONDS" || true
+  done
+}
+
+main "$@"

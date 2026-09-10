@@ -120,6 +120,34 @@ cat >"$fake_bin/ss" <<'EOF'
 exit 0
 EOF
 
+cat >"$fake_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "${1:-}" == --user ]] && shift
+[[ -z "${FAKE_SYSTEMCTL_LOG:-}" ]] || printf '%s\n' "$*" >>"$FAKE_SYSTEMCTL_LOG"
+case "${1:-}" in
+  show-environment | daemon-reload) exit 0 ;;
+  enable)
+    [[ "${2:-}" == --now && "${3:-}" == no-more-404-hermes-follower.service ]]
+    : >"$FAKE_FOLLOWER_ENABLED"
+    : >"$FAKE_FOLLOWER_ACTIVE"
+    ;;
+  is-enabled)
+    [[ "${2:-}" == --quiet ]] && shift
+    [[ "${2:-}" == no-more-404-hermes-follower.service && -e "$FAKE_FOLLOWER_ENABLED" ]]
+    ;;
+  is-active)
+    [[ "${2:-}" == --quiet ]] && shift
+    [[ "${2:-}" == no-more-404-hermes-follower.service && -e "$FAKE_FOLLOWER_ACTIVE" ]]
+    ;;
+  status) exit 0 ;;
+  *)
+    printf 'unexpected fake systemctl arguments: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+EOF
+
 cat >"$fake_bin/uname" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' x86_64
@@ -144,14 +172,17 @@ chmod 0755 \
   "$fake_bin/awk" \
   "$fake_bin/curl" \
   "$fake_bin/ss" \
+  "$fake_bin/systemctl" \
   "$fake_bin/uname"
 
 prepare_home() {
   local test_home="$1"
   local config_directory="$test_home/.config/no-more-404"
-  mkdir -p "$config_directory"
+  mkdir -p "$config_directory" "$test_home/.config/systemd/user"
   cp "$repo_root/config/runtime.env.example" "$config_directory/runtime.env"
   cp "$repo_root/config/models.ini.example" "$config_directory/models.ini"
+  cp "$repo_root/systemd/user/no-more-404-hermes-follower.service" \
+    "$test_home/.config/systemd/user/no-more-404-hermes-follower.service"
   chmod 0600 "$config_directory/runtime.env" "$config_directory/models.ini"
 }
 
@@ -178,7 +209,7 @@ printf 'synthetic model fixture\n' >"$model_path"
 
 setup_output="$(run_setup "$test_home" "$model_path" env)"
 
-grep -Fq 'No persistent service or Hermes process will be started.' <<<"$setup_output"
+grep -Fq 'The model test will not start a persistent service or Hermes.' <<<"$setup_output"
 grep -Fq 'A temporary local model test will run' <<<"$setup_output"
 grep -Fq 'Memory preflight passed without loading model weights.' <<<"$setup_output"
 grep -Fq 'Model test passed. llama.cpp selected a 131072-token context' <<<"$setup_output"
@@ -213,6 +244,36 @@ grep -Fxq -- --fit-ctx "$fit_argument_capture"
 grep -Fxq -- --flash-attn "$fit_argument_capture"
 grep -Fxq -- --verbose "$fit_argument_capture"
 [[ ! -e "$server_state" ]]
+
+# Pressing Enter at setup's automatic Desktop-integration question enables the
+# lightweight follower after the model test and does not edit or launch Hermes.
+automatic_home="$test_directory/automatic-desktop-home"
+automatic_model="$automatic_home/model.gguf"
+automatic_enabled="$test_directory/automatic-follower-enabled"
+automatic_active="$test_directory/automatic-follower-active"
+automatic_systemctl_log="$test_directory/automatic-systemctl.log"
+prepare_home "$automatic_home"
+printf 'synthetic automatic-integration model\n' >"$automatic_model"
+automatic_output="$(
+  printf '%s\n%s\n%s\n\n' "$binary_path" "$automatic_model" 'automatic-model' |
+    HOME="$automatic_home" \
+      XDG_CONFIG_HOME="$automatic_home/.config" \
+      PATH="$fake_bin:/usr/bin:/bin" \
+      FAKE_SERVER_STATE="$server_state" \
+      FAKE_ARGUMENT_CAPTURE="$argument_capture" \
+      FAKE_FIT_ARGUMENT_CAPTURE="$fit_argument_capture" \
+      FAKE_FOLLOWER_ENABLED="$automatic_enabled" \
+      FAKE_FOLLOWER_ACTIVE="$automatic_active" \
+      FAKE_SYSTEMCTL_LOG="$automatic_systemctl_log" \
+      "$repo_root/bin/no-more-404" setup
+)"
+grep -Fq 'Automatically start NoMore404 when Hermes Desktop opens' \
+  <<<"$automatic_output"
+grep -Fq 'Automatic Hermes Desktop integration is enabled.' \
+  <<<"$automatic_output"
+[[ -e "$automatic_enabled" && -e "$automatic_active" ]]
+grep -Fxq 'enable --now no-more-404-hermes-follower.service' \
+  "$automatic_systemctl_log"
 
 runtime_hash="$(sha256sum "$config_directory/runtime.env")"
 model_hash="$(sha256sum "$config_directory/models.ini")"

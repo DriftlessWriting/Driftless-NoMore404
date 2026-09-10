@@ -7,8 +7,14 @@ Driftless-NoMore404 is an independent, unofficial Linux lifecycle companion for
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) and
 [llama.cpp](https://github.com/ggml-org/llama.cpp). It starts
 an on-demand local-model router, waits for its health endpoint, limits model
-residency so idle models can release GPU memory (VRAM), and gives Hermes a
-stable local-only endpoint that speaks the same API as OpenAI.
+residency to one so local-model changes safely replace the previous worker,
+lets idle models release GPU memory (VRAM), and gives Hermes a stable local-only
+endpoint that speaks the same API as OpenAI.
+
+With one explicit choice during guided setup, a lightweight follower also makes
+that runtime start when the user opens Hermes Desktop and stop when the last
+Hermes Desktop process closes—without rewriting or independently launching
+Hermes.
 
 **New here?** Start with the [Quickstart](docs/QUICKSTART.md). It is written
 for first-time installers and does not assume access to an AI helper.
@@ -35,11 +41,11 @@ to own the same llama.cpp process or compete for the same model load.
 
 ## Install in one command
 
-On a supported Linux desktop, this installs the `1.0.0` package for the current
+On a supported Linux desktop, this installs the `1.2.1` package for the current
 user without `sudo` and without starting or enabling anything:
 
 ```bash
-bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.0.0/install.sh | bash'
+bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.1/install.sh | bash'
 ```
 
 The bootstrap downloads the tagged source into a private temporary directory,
@@ -57,14 +63,14 @@ small bootstrap before running it:
 ```bash
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
   --output no-more-404-install.sh \
-  https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.0.0/install.sh
+  https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.1/install.sh
 less no-more-404-install.sh
 bash no-more-404-install.sh
 ```
 
 ## What it does
 
-- Installs a small Bash CLI and four systemd user units.
+- Installs a small Bash CLI and five systemd user units.
 - Auto-discovers a compatible `llama-server`, accepts a user-supplied one, or
   explicitly installs a pinned and checksum-verified official Linux runtime.
 - Lets the user choose the GGUF, then asks llama.cpp to fit that model to the
@@ -79,8 +85,11 @@ bash no-more-404-install.sh
 - Runs a temporary one-token local chat test before saving first-run
   configuration, then unloads the tested model.
 - Rejects non-loopback bind addresses.
-- Starts with no model preloaded, allows at most one resident model by default,
-  and asks llama.cpp to unload it after an idle interval.
+- Starts with no model preloaded and enforces exactly one resident-model slot.
+  When Hermes first requests a different picker alias, llama.cpp waits for a
+  busy model to finish, unloads the old worker, loads the selected model, and
+  then serves the queued request. It unloads the selected model again after an
+  idle interval.
 - Waits for llama.cpp's `/health` endpoint on explicit `start`, `restart`, and
   `run` operations.
 - Uses systemd `Restart=on-failure` to recover when the server process exits
@@ -90,20 +99,25 @@ bash no-more-404-install.sh
   checks, so a router that hangs while still running is detected and replaced.
 - Stops the service control group so model workers do not knowingly outlive the
   managed runtime.
-- Includes an optional Hermes Desktop session adapter. When an existing
-  user-controlled Hermes launcher invokes it, the runtime starts alongside
-  Hermes and stops when that session ends; the adapter also applies a strict
-  Electron sandbox-helper check.
-- Provides guided initial `setup` plus `register-hermes`, `doctor`, `status`,
-  `logs`, and `endpoint` commands. With explicit approval, setup can add the
-  configured local-model aliases to Hermes Desktop's model picker.
+- Offers automatic Hermes Desktop following during setup. A lightweight user
+  service observes only the invoking user's native Hermes Electron process,
+  starts the runtime alongside it, waits for router health, and stops only a
+  runtime it owns after Hermes closes. It does not rewrite a desktop entry or
+  start Hermes.
+- Retains an advanced foreground session adapter for custom or renamed Desktop
+  builds that cannot be recognised automatically.
+- Provides guided initial `setup` and `add-model` flows plus
+  `register-hermes`, `doctor`, `status`, `logs`, and `endpoint` commands. With
+  explicit approval, either guided flow can add the configured local-model
+  aliases to Hermes Desktop's model picker.
 
 ## What it does not do
 
 - It does not install, update, modify, or launch Hermes Agent automatically.
-- It does not enable or schedule Hermes Desktop, edit a desktop entry, or add a
-  second login-autostart mechanism. The optional session adapter runs only
-  when an existing Hermes launcher explicitly invokes it.
+- It does not enable, schedule, edit, or independently launch Hermes Desktop.
+  If the user approves automatic integration during setup, it enables only a
+  lightweight NoMore404 follower in the user's systemd session. That follower
+  waits for Hermes; it never starts Hermes itself.
 - It does not silently download or update llama.cpp. `setup` and
   `install-runtime` can explicitly download the pinned official Linux runtime;
   an existing compatible build remains fully supported.
@@ -111,8 +125,10 @@ bash no-more-404-install.sh
 - It does not silently change Hermes configuration or switch Hermes's current
   or default model. The optional `register-hermes` command uses Hermes's own
   configuration CLI to add or update only the named `NoMore404 Local` provider.
-- It does not enable itself at login. Installation leaves the units disabled
-  and stopped.
+- The installer does not enable anything at login. Guided setup enables the
+  lightweight Hermes follower only after a separate explicit yes/no choice;
+  the model runtime itself remains disabled and starts only with Hermes or an
+  explicit NoMore404 command.
 - It is not a full watchdog. The health timer only acts while the runtime is
   active, probes the router's `/health` endpoint, and restarts the target after
   a bounded number of consecutive failures. It does not judge whether a loaded
@@ -135,7 +151,7 @@ Native Windows and macOS are not supported by this package. WSL requires a
 working systemd user session and remains an environment-specific setup.
 
 The package is distribution-independent within that boundary; it does not
-depend on CachyOS or an Arch package manager. The `1.0.0` package checks pass
+depend on CachyOS or an Arch package manager. The `1.2.1` package checks pass
 on the following environments:
 
 | Environment | Validation |
@@ -208,7 +224,9 @@ For a first installation, run the guided setup. It finds `llama-server` when it
 is already on `PATH`. If none is found, pressing Enter explicitly installs the
 pinned official runtime for the current user. Setup then asks for the user's
 GGUF and a picker name and, when Hermes is installed, one separate yes/no
-question about adding that name to Hermes Desktop's picker:
+question about adding that name to Hermes Desktop's picker. It then asks one
+more clear question about making the runtime automatically follow Hermes
+Desktop sessions:
 
 ```bash
 ~/.local/bin/no-more-404 setup
@@ -217,9 +235,24 @@ question about adding that name to Hermes Desktop's picker:
 It temporarily loads the selected model, lets llama.cpp fit the largest context
 that the current hardware can support without crossing the 64K floor, checks
 the local chat endpoint, unloads the model, and only then writes private
-configuration. No persistent service or Hermes process is started. If you
-approve the picker step, it registers the alias and measured context under
-`NoMore404 Local` without switching Hermes's current or default model.
+configuration. The model test does not start a persistent service or Hermes
+process. If you approve the picker step, setup registers the alias and measured
+context under `NoMore404 Local` without switching Hermes's current or default
+model. If you approve automatic Desktop following, setup enables a tiny user
+service which waits without loading a model; when Hermes is already open, it
+starts the configured runtime immediately.
+
+Add each additional user-chosen GGUF through the same sizing and local test:
+
+```bash
+no-more-404 add-model
+```
+
+`add-model` refuses to compete with an open Hermes session or active
+NoMore404 runtime. It independently fits the new GGUF, appends its picker name
+only after the test passes, and offers to refresh all configured aliases in
+Hermes. It does not download, recommend, or choose the model.
+
 Alternatively, edit these installed files manually:
 
 ```text
@@ -272,9 +305,9 @@ endpoint.
 
 ## Connect Hermes
 
-If you accepted the final setup prompt, the configured alias is already listed
-under **NoMore404 Local**. Otherwise, register or refresh all aliases from the
-installed `models.ini` with:
+If you accepted setup's model-picker prompt, the configured alias is already
+listed under **NoMore404 Local**. Otherwise, register or refresh all aliases
+from the installed `models.ini` with:
 
 ```bash
 no-more-404 register-hermes
@@ -283,7 +316,11 @@ no-more-404 register-hermes
 This command changes only `providers.no-more-404` through Hermes's own
 configuration command. It never changes `model.default`, `model.provider`, or
 the model used by a running Hermes session. In Hermes Desktop, choose **Refresh
-models**, then select the alias you configured.
+models**, then select any alias you configured. The picker changes Hermes's
+requested model; the first request using that alias triggers NoMore404's
+automatic switch. If the old model is still serving a request, llama.cpp queues
+the new one instead of terminating the busy worker, then unloads the old model
+and loads the selected model when the slot is safe to replace.
 
 Print the local endpoint at any time with:
 
@@ -329,9 +366,16 @@ Driftless-NoMore404 writes this provider only after the explicit setup choice or
 `hermes model` when an older installed Hermes expects a different layout.
 Hermes installation and updates remain entirely with its upstream process.
 
-To make the runtime follow an existing Hermes Desktop session—and to preserve
-the hardened Electron sandbox check used by local desktop builds—see
-[Optional Hermes Desktop session integration](docs/HERMES_DESKTOP.md).
+If automatic Desktop following was skipped during setup, enable it later with:
+
+```bash
+no-more-404 integrate-hermes-desktop
+```
+
+No desktop-file editing is required. Disable it at any time with
+`no-more-404 remove-hermes-desktop-integration`. Custom or renamed Electron
+builds can use the advanced foreground adapter documented in
+[Hermes Desktop integration](docs/HERMES_DESKTOP.md).
 
 ## Use the runtime
 
@@ -352,8 +396,10 @@ no-more-404 run -- /path/to/foreground-client
 `run` stops the runtime afterward only if it started the runtime itself. If the
 target was already active, it leaves it active. A model may still unload after
 the configured idle interval while the lightweight llama.cpp router remains
-running. A private lifecycle lock serialises owning Hermes sessions, `run`,
-`start`, and `restart`. While an owning session is active, a concurrent
+running. Changing aliases in Hermes needs no NoMore404 command: the selected
+alias is carried in Hermes's next request and the one-slot router performs the
+safe replacement. A private lifecycle lock serialises owning Hermes sessions,
+`run`, `start`, and `restart`. While an owning session is active, a concurrent
 `start`, `restart`, or second owning session is rejected rather than reporting
 durable ownership of a runtime that the first session may stop when its child
 exits. After that session finishes, ordinary starts work normally.
@@ -387,8 +433,11 @@ remains the manual escape hatch for any situation the bounded policy does not
 cover.
 
 Failure reporting is local: commands return nonzero with an error, `doctor`
-reports broken state, and `logs` includes both router and watchdog journal
-messages. The package does not send desktop, email, or remote notifications.
+reports broken state, and `logs` includes router, watchdog, and Desktop-follower
+journal messages. If automatic following cannot start the runtime, it also
+uses `notify-send` for one best-effort local desktop notice when that optional
+command is available. The package sends no email, telemetry, or remote
+notification.
 
 ## Security posture
 
@@ -398,6 +447,9 @@ messages. The package does not send desktop, email, or remote notifications.
   disabled by default.
 - Runtime configuration, state, cache directories, and installer backups are
   created with private permissions where the scripts manage them.
+- The optional automatic follower reads only same-user Linux process names and
+  command roles needed to distinguish the main Hermes Electron process from
+  its renderer helpers. It does not inspect Hermes conversations or files.
 - The service runs as the current user with a small set of systemd hardening
   options. It is **not** a complete sandbox and retains the filesystem and GPU
   access needed by the configured executable and models.
@@ -422,7 +474,8 @@ Then uninstall package-managed files:
 ./scripts/uninstall.sh
 ```
 
-The uninstaller removes only files whose hashes still match its install
+The uninstaller first disables the automatic Hermes follower and stops a
+NoMore404 runtime, then removes only files whose hashes still match its install
 manifest. It preserves locally modified files and keeps configuration, models,
 caches, state, and backups. It also preserves the separately owned Hermes
 provider entry; remove that explicitly, if wanted, with
@@ -431,14 +484,14 @@ provider entry; remove that explicitly, if wanted, with
 ## Repository layout
 
 ```text
-bin/                         CLI, router wrapper, watchdog, optional Hermes adapter
+bin/                         CLI, router, watchdog, and Hermes lifecycle helpers
 config/                      private-runtime and model-preset examples
 docs/ARCHITECTURE.md         component, lifecycle, and failure boundaries
-docs/HERMES_DESKTOP.md       optional session coupling and Electron sandbox check
+docs/HERMES_DESKTOP.md       automatic following and advanced session adapter
 docs/QUICKSTART.md           first-time setup path, written for new installers
 install.sh                   tagged-release bootstrap used by the one-command install
 scripts/                     cautious install, uninstall, and audit helpers
-systemd/user/                on-demand target, router, and watchdog units
+systemd/user/                router, watchdog, and optional Desktop follower units
 tests/                       syntax, policy, wrapper, and unit checks
 vendor/llama.cpp.lock        tested-upstream provenance; no vendored code
 THIRD_PARTY_NOTICES.md       upstream license and naming notices

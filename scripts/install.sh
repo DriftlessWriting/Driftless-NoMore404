@@ -103,22 +103,26 @@ managed_sources=(
   "$repo_root/bin/no-more-404-router"
   "$repo_root/bin/no-more-404-health"
   "$repo_root/bin/no-more-404-hermes-session"
+  "$repo_root/bin/no-more-404-hermes-follower"
   "$repo_root/systemd/user/no-more-404.target"
   "$repo_root/systemd/user/no-more-404-router.service"
   "$repo_root/systemd/user/no-more-404-watch.service"
   "$repo_root/systemd/user/no-more-404-watch.timer"
+  "$repo_root/systemd/user/no-more-404-hermes-follower.service"
 )
 managed_destinations=(
   "$bin_dir/no-more-404"
   "$libexec_dir/no-more-404-router"
   "$libexec_dir/no-more-404-health"
   "$libexec_dir/no-more-404-hermes-session"
+  "$libexec_dir/no-more-404-hermes-follower"
   "$unit_dir/no-more-404.target"
   "$unit_dir/no-more-404-router.service"
   "$unit_dir/no-more-404-watch.service"
   "$unit_dir/no-more-404-watch.timer"
+  "$unit_dir/no-more-404-hermes-follower.service"
 )
-managed_modes=(0755 0755 0755 0755 0644 0644 0644 0644)
+managed_modes=(0755 0755 0755 0755 0755 0644 0644 0644 0644 0644)
 
 for index in "${!managed_sources[@]}"; do
   source_path="${managed_sources[$index]}"
@@ -196,9 +200,9 @@ run systemctl --user daemon-reload
 printf '\nInstalled without starting or enabling any service.\n'
 printf '1. Choose and download a GGUF model with at least 64K context.\n'
 printf '2. Run: %s setup\n' "$bin_dir/no-more-404"
-printf '   Setup finds llama-server or offers a verified runtime, then sizes and tests your chosen model.\n'
+printf '   Setup sizes and tests your model, adds it to Hermes if approved, and offers automatic Desktop following.\n'
 printf '3. Run: %s doctor\n' "$bin_dir/no-more-404"
-printf '4. Run: %s start\n' "$bin_dir/no-more-404"
+printf '4. Open Hermes Desktop normally, or run "%s start" for CLI-only use.\n' "$bin_dir/no-more-404"
 printf 'Setup guide: https://github.com/DriftlessWriting/Driftless-NoMore404/blob/v%s/docs/QUICKSTART.md\n' \
   "$package_version"
 case ":$PATH:" in

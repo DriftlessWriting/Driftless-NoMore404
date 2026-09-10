@@ -1,0 +1,25 @@
+[Unit]
+Description=Follow user-started Hermes Desktop sessions with Driftless-NoMore404
+Documentation=https://github.com/DriftlessWriting/Driftless-NoMore404
+After=graphical-session.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%E/no-more-404/runtime.env
+ExecStart=%h/.local/libexec/no-more-404/no-more-404-hermes-follower
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=64 66 78
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+UMask=0077
+
+# This lightweight observer is enabled only after the user approves Desktop
+# integration during setup. It never launches Hermes or loads a model itself.
+
+[Install]
+WantedBy=default.target

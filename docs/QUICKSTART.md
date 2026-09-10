@@ -12,9 +12,12 @@ friends — that:
 
 - start your local model server only when you ask, so it is not resident or
   using memory the rest of the time;
-- keep at most one model loaded by default and ask the server to release it
-  from memory after one idle minute;
+- keep exactly one model loaded at a time, safely replace it when you choose a
+  different local alias, and ask the server to release it from memory after one
+  idle minute;
 - restart the server automatically if it crashes;
+- automatically follow a user-started Hermes Desktop session when you approve
+  that setup choice—without editing or launching Hermes; and
 - give Hermes a stable, local-only endpoint: `http://127.0.0.1:55984/v1`.
 
 The running endpoint stays on your machine and listens only on loopback (your
@@ -65,7 +68,7 @@ different `llama-server`, its own dependencies may differ.
 Copy and paste this entire command:
 
 ```bash
-bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.0.0/install.sh | bash'
+bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.1/install.sh | bash'
 ```
 
 It downloads the tagged source temporarily, installs the user-owned commands
@@ -76,10 +79,10 @@ add that directory to your shell configuration.
 
 ## What you must provide once
 
-You provide **one GGUF model file that you have chosen**. It needs a working
-tool-calling Jinja chat template and a context of at least 64,000 tokens for
-current Hermes releases. Check the publisher's documentation and licence, and
-keep the file somewhere like `$HOME/models/`.
+You provide **at least one GGUF model file that you have chosen**. Each one
+needs a working tool-calling Jinja chat template and a context of at least
+64,000 tokens for current Hermes releases. Check the publisher's documentation
+and licence, and keep the files somewhere like `$HOME/models/`.
 
 NoMore404 does not recommend, favour, or download a model. If a selected GGUF is
 too large for the machine, setup gives a conservative approximate GGUF file
@@ -144,7 +147,31 @@ will still be free when the later load occurs.
 The suggested alias, `local-main`, is only a label; it does not choose or imply
 a particular model. If Hermes is installed, setup separately asks whether to
 add that alias and measured context under **NoMore404 Local**. It never switches
-Hermes's current or default model.
+Hermes's current or default model. Setup then asks whether NoMore404 should
+automatically follow Hermes Desktop. Press Enter or answer `yes` for the normal
+Desktop experience. A lightweight user service will wait without loading a
+model, start the runtime when you open Hermes, and stop its owned runtime when
+Hermes closes. It never starts or changes Hermes.
+
+## Add more models to the picker
+
+You can stop after one model. To add another later, first close Hermes Desktop
+or stop a manually started NoMore404 runtime, then run:
+
+```bash
+no-more-404 add-model
+```
+
+Enter the additional GGUF path and the name you want to see in Hermes. Names
+may contain ordinary spaces, so labels such as `Writing Model` are supported.
+NoMore404 repeats the memory projection, hardware fitting, 64K-floor check, and
+local chat test for that GGUF. It changes nothing if the test fails. If Hermes
+is installed, press Enter at the final question to add or refresh every
+configured alias under **NoMore404 Local**.
+
+Repeat this command for any other user-chosen models. NoMore404 still keeps
+only one model resident at a time; adding models to the picker does not preload
+them or increase idle VRAM use.
 
 If you prefer to configure it manually, edit these two files:
 
@@ -184,15 +211,23 @@ copy the illustrative context blindly: setting it too high can exhaust memory,
 while setting every machine to 64K unnecessarily limits hardware that can run
 more. Guided setup is the normal path.
 
-## Check it, then start it
+## Check it, then use it
 
 ```bash
-no-more-404 doctor     # every line should say OK
-no-more-404 start      # waits until the local endpoint answers
+no-more-404 doctor     # there should be no FAIL lines
 ```
 
 If `doctor` shows a `FAIL`, do not start — fix the line it names and re-run. It
 also rejects a model whose effective `ctx-size` is below Hermes's 64K minimum.
+
+If automatic Desktop following was approved, just open Hermes Desktop normally.
+NoMore404 detects it, waits for the local endpoint to become healthy, and stops
+the owned runtime when Hermes closes. If you use Hermes Agent without Desktop,
+or chose not to enable following, start the endpoint explicitly:
+
+```bash
+no-more-404 start
+```
 
 ## Install Hermes Agent if needed
 
@@ -211,15 +246,15 @@ for current options and troubleshooting.
 
 Nous Research's current [Hermes Desktop guide](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/desktop.md)
 documents Desktop on Linux as well as macOS and Windows. NoMore404 still does
-not install Hermes Desktop. Its optional session adapter is only for a working
-Desktop installation that the user has chosen to launch through that adapter.
-Hermes Desktop's own **Settings → Providers → Local Models** flow is a separate
-runtime manager; choose it or NoMore404 for a session, not both.
+not install, modify, schedule, or independently launch Hermes Desktop. Its
+automatic follower simply notices a native Hermes Desktop process started by
+the user. Hermes Desktop's own **Settings → Providers → Local Models** flow is
+a separate runtime manager; choose it or NoMore404 for a session, not both.
 
 ## Connect Hermes to NoMore404
 
-If you accepted setup's final prompt, your alias is already registered. If you
-skipped it, or later add aliases to `models.ini`, run:
+If you accepted setup's model-picker prompt, your alias is already registered.
+If you skipped it, or later add aliases to `models.ini`, run:
 
 ```bash
 no-more-404 register-hermes
@@ -227,7 +262,12 @@ no-more-404 register-hermes
 
 This uses Hermes's own configuration command to add or update only the
 `NoMore404 Local` provider. It does not change Hermes's current or default
-model. In Hermes Desktop, choose **Refresh models**, then select the alias.
+model. In Hermes Desktop, choose **Refresh models**, then select any alias.
+The first message sent with the new selection is the switch request. If the
+old local model is busy, llama.cpp waits for that work to finish rather than
+killing it; it then unloads the old model, loads the selected model into the
+single slot, and continues the queued request. You do not run a separate
+switch command.
 
 The endpoint is local only; print it with `no-more-404 endpoint`. Older Hermes
 versions without `hermes config set` can use `hermes model` and **Custom
@@ -251,21 +291,35 @@ same section name you gave in `models.ini`. No API key is needed for the
 enforced loopback endpoint. Prefer `hermes model` if your installed Hermes
 version expects a different configuration layout.
 
-If you want the runtime to start only when you launch Hermes Desktop and stop
-when Hermes exits, follow the optional
-[Hermes Desktop session integration](HERMES_DESKTOP.md). The package does not
-enable or schedule Hermes itself.
+If you skipped automatic Desktop following during setup, enable it now:
+
+```bash
+no-more-404 integrate-hermes-desktop
+```
+
+No launcher editing is required. The follower starts only NoMore404's runtime
+after you start Hermes and stops only a runtime it owns. Disable it with
+`no-more-404 remove-hermes-desktop-integration`. Custom renamed Desktop builds
+and the exact lifecycle rules are covered in
+[Hermes Desktop integration](HERMES_DESKTOP.md).
 
 ## Day to day
 
 ```bash
 no-more-404 status     # is it running?
 no-more-404 logs       # what is it doing?
-no-more-404 stop       # stop the runtime (models release)
+no-more-404 stop       # stop a manually started runtime
 ```
 
 The model stays in memory for one minute of inactivity, then the server
-releases it. The next request loads it again on demand.
+releases it. The next request loads it again on demand. Choosing another
+NoMore404 alias from Hermes's model picker uses the same on-demand path and
+does not require restarting Hermes or NoMore404.
+
+While Hermes is open and automatic following owns the runtime, it will restore
+an intentionally stopped target to honour the selected follow behavior. To keep
+the runtime off while Hermes stays open, first run
+`no-more-404 remove-hermes-desktop-integration`.
 
 ## When something is wrong
 
@@ -283,3 +337,7 @@ and anything else identifying your machine. The server auto-restarts on crash.
 A bounded timer also replaces a live router after consecutive failed health
 checks; `no-more-404 restart` remains the manual recovery command when a
 request is stuck but `/health` still answers.
+
+Automatic Desktop startup failures are written to `no-more-404 logs`. When the
+optional `notify-send` command is available, the follower also shows one local
+desktop notice rather than repeatedly interrupting the user.

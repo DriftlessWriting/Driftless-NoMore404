@@ -2,7 +2,6 @@
 Description=Driftless-NoMore404 router health checks
 Documentation=https://github.com/DriftlessWriting/Driftless-NoMore404
 PartOf=no-more-404.target
-After=no-more-404.target
 
 [Timer]
 # The timer is enabled, not started on its own: it is pulled in when the
