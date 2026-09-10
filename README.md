@@ -3,6 +3,25 @@
 > **Platform:** Linux desktops with a working systemd user manager. Native
 > Windows and macOS are not supported by this release.
 
+## For non-technical users
+
+Already have Hermes Desktop and a GGUF model downloaded? Copy and paste this
+whole command into a terminal, then press Enter:
+
+```bash
+bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.3/install.sh | bash'
+```
+
+Select your GGUF model when the file window opens. Press Enter to accept the
+normal choices. When the terminal says **Ready**, open Hermes Desktop, choose
+**Refresh models** once, and select your model under **NoMore404 Local**. Enjoy.
+
+That one command installs NoMore404, checks that the chosen model can run,
+wires its name into Hermes's model selector, and makes NoMore404 start and stop
+with a Hermes session. It does not require coding, manual configuration, or an
+AI helper. If Hermes or a GGUF model is not installed yet, use the
+[beginner Quickstart](docs/QUICKSTART.md) first.
+
 Driftless-NoMore404 is an independent, unofficial Linux lifecycle companion for
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) and
 [llama.cpp](https://github.com/ggml-org/llama.cpp). It starts
@@ -41,13 +60,13 @@ to own the same llama.cpp process or compete for the same model load.
 
 ## Install in one command
 
-On a supported Linux desktop, this one command installs the `1.2.2` package for
+On a supported Linux desktop, this one command installs the `1.2.3` package for
 the current user and continues directly into guided model selection and Hermes
 integration. Have Hermes and at least one chosen GGUF file installed first. No
 `sudo` or AI helper is required:
 
 ```bash
-bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.2/install.sh | bash'
+bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.3/install.sh | bash'
 ```
 
 The bootstrap downloads the tagged source into a private temporary directory,
@@ -76,7 +95,7 @@ small bootstrap before running it:
 ```bash
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
   --output no-more-404-install.sh \
-  https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.2/install.sh
+  https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.3/install.sh
 less no-more-404-install.sh
 bash no-more-404-install.sh
 ```
@@ -164,7 +183,7 @@ Native Windows and macOS are not supported by this package. WSL requires a
 working systemd user session and remains an environment-specific setup.
 
 The package is distribution-independent within that boundary; it does not
-depend on CachyOS or an Arch package manager. The `1.2.2` package checks pass
+depend on CachyOS or an Arch package manager. The `1.2.3` package checks pass
 on the following environments:
 
 | Environment | Validation |

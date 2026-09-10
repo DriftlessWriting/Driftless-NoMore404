@@ -5,6 +5,25 @@ into a terminal. It applies to a Linux desktop session with a working systemd
 user manager. If a step fails, jump to
 [When something is wrong](#when-something-is-wrong).
 
+## The short version
+
+If Hermes Desktop is installed and you have downloaded the GGUF model you want,
+copy and paste this whole command into a terminal:
+
+```bash
+bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.3/install.sh | bash'
+```
+
+Select your GGUF when the file window opens, then press Enter to accept the
+normal choices. When setup says **Ready**, open Hermes Desktop, choose
+**Refresh models** once, and select the model under **NoMore404 Local**. That is
+the complete normal setup: there is no code or configuration file to edit, and
+you do not need an AI helper.
+
+NoMore404 does not choose or download a model for you. If Hermes, the model, or
+the few ordinary Linux prerequisites are not ready yet, continue through the
+steps below.
+
 ## What this package gives you
 
 A small set of commands — `no-more-404 start`, `stop`, `doctor`, and
@@ -70,7 +89,7 @@ choice. The installer asks you to select that file immediately. Then copy and
 paste this entire command:
 
 ```bash
-bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.2/install.sh | bash'
+bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.3/install.sh | bash'
 ```
 
 It downloads the tagged source temporarily, installs the user-owned commands
@@ -84,6 +103,12 @@ following. The command then runs `doctor` and removes the temporary source.
 NoMore404 does not launch Hermes or change its currently selected model. When
 the command says **Ready**, open Hermes Desktop, choose **Refresh models**, and
 select the name you just configured under **NoMore404 Local**.
+
+Hermes makes every model in a newly registered **NoMore404 Local** provider
+visible in its normal model selector automatically. You do not need to use
+**Edit models** during a normal installation. If you had previously hidden that
+provider or an individual model, **Edit models** is where you can turn it back
+on.
 
 ## What you must provide once
 
@@ -271,7 +296,9 @@ no-more-404 register-hermes
 
 This uses Hermes's own configuration command to add or update only the
 `NoMore404 Local` provider. It does not change Hermes's current or default
-model. In Hermes Desktop, choose **Refresh models**, then select any alias.
+model. The registered aliases are automatically visible in Hermes Desktop's
+normal model selector; if the menu was already open, choose **Refresh models**,
+then select any alias under **NoMore404 Local**.
 The first message sent with the new selection is the switch request. If the
 old local model is busy, llama.cpp waits for that work to finish rather than
 killing it; it then unloads the old model, loads the selected model into the

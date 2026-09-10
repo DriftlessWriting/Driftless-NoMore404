@@ -7,8 +7,8 @@ test_directory="$(mktemp -d)"
 trap 'rm -rf -- "$test_directory"' EXIT
 
 archive_parent="$test_directory/archive"
-archive_root="$archive_parent/Driftless-NoMore404-1.2.2"
-archive_path="$test_directory/Driftless-NoMore404-1.2.2.tar.gz"
+archive_root="$archive_parent/Driftless-NoMore404-1.2.3"
+archive_path="$test_directory/Driftless-NoMore404-1.2.3.tar.gz"
 fake_bin="$test_directory/bin"
 test_home="$test_directory/home"
 systemctl_log="$test_directory/systemctl.log"
@@ -62,14 +62,14 @@ bootstrap_output="$(
     "$repo_root/install.sh" --no-setup
 )"
 
-grep -Fq 'Downloading Driftless-NoMore404 1.2.2 from GitHub...' \
+grep -Fq 'Downloading Driftless-NoMore404 1.2.3 from GitHub...' \
   <<<"$bootstrap_output"
 grep -Fq 'Installed without starting or enabling any service.' \
   <<<"$bootstrap_output"
 grep -Fq 'Guided setup was skipped by request.' <<<"$bootstrap_output"
-grep -Fq 'Bootstrap completed from the v1.2.2 source release.' \
+grep -Fq 'Bootstrap completed from the v1.2.3 source release.' \
   <<<"$bootstrap_output"
-grep -Fq 'https://github.com/DriftlessWriting/Driftless-NoMore404/archive/refs/tags/v1.2.2.tar.gz' \
+grep -Fq 'https://github.com/DriftlessWriting/Driftless-NoMore404/archive/refs/tags/v1.2.3.tar.gz' \
   "$curl_log"
 [[ -x "$test_home/.local/bin/no-more-404" ]]
 [[ -f "$test_home/.config/systemd/user/no-more-404.target" ]]
@@ -92,7 +92,7 @@ HOME="$dry_run_home" \
 [[ ! -e "$dry_run_home/.local/bin/no-more-404" ]]
 
 wrong_version_parent="$test_directory/wrong-version"
-wrong_version_root="$wrong_version_parent/Driftless-NoMore404-1.2.2"
+wrong_version_root="$wrong_version_parent/Driftless-NoMore404-1.2.3"
 wrong_version_archive="$test_directory/wrong-version.tar.gz"
 wrong_version_home="$test_directory/wrong-version-home"
 mkdir -p "$wrong_version_root" "$wrong_version_home"
@@ -115,7 +115,7 @@ wrong_version_output="$(
 wrong_version_status=$?
 set -e
 [[ "$wrong_version_status" != 0 ]]
-grep -Fq 'downloaded release version is 9.9.9, expected 1.2.2' \
+grep -Fq 'downloaded release version is 9.9.9, expected 1.2.3' \
   <<<"$wrong_version_output"
 [[ ! -e "$wrong_version_home/.local/bin/no-more-404" ]]
 

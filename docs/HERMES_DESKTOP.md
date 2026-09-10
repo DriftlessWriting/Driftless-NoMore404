@@ -14,6 +14,12 @@ llama.cpp waits if the current model is busy, then unloads it and loads the
 selected model into NoMore404's single resident slot. Use
 `no-more-404 add-model` to fit another GGUF and offer its alias to the picker.
 
+On a normal installation, Hermes automatically shows every registered
+NoMore404 alias in its model selector; the user does not need to enable them in
+**Edit models**. If Hermes was already open while registration ran, choose
+**Refresh models** once. A model or provider that the user deliberately hid can
+be restored through **Edit models**.
+
 Hermes Desktop also provides its own **Local Models** manager. Use that manager
 or NoMore404 for a given local-model session, not both. NoMore404 does not
 disable, modify, or inspect Hermes's built-in manager.

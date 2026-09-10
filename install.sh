@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly package_version='1.2.2'
+readonly package_version='1.2.3'
 readonly repository='DriftlessWriting/Driftless-NoMore404'
 readonly archive_url="https://github.com/$repository/archive/refs/tags/v$package_version.tar.gz"
 
@@ -130,7 +130,7 @@ if [[ "$dry_run" == false && "$run_setup" == true ]] &&
   cat "$doctor_output"
   [[ "$doctor_passed" == true ]] ||
     fail "final readiness checks did not pass; run '$installed_cli doctor' for the current state"
-  printf '\nReady. Open Hermes Desktop, choose Refresh models, and select the model name you configured.\n'
+  printf '\nReady. Open Hermes Desktop, choose Refresh models, and select your model under NoMore404 Local.\n'
 elif [[ "$dry_run" == false && "$run_setup" == true ]]; then
   printf '\nExisting configuration was preserved, so first-time setup was not repeated.\n'
   printf 'Verify it at any time with: %s doctor\n' "$installed_cli"
