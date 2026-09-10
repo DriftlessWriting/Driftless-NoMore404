@@ -7,8 +7,8 @@ test_directory="$(mktemp -d)"
 trap 'rm -rf -- "$test_directory"' EXIT
 
 archive_parent="$test_directory/archive"
-archive_root="$archive_parent/Driftless-NoMore404-1.2.2"
-archive_path="$test_directory/Driftless-NoMore404-1.2.2.tar.gz"
+archive_root="$archive_parent/Driftless-NoMore404-1.2.3"
+archive_path="$test_directory/Driftless-NoMore404-1.2.3.tar.gz"
 fake_bin="$test_directory/bin"
 test_home="$test_directory/home with spaces"
 model_path="$test_home/Chosen Model.Q4_K_M.gguf"
@@ -106,10 +106,10 @@ while (( $# > 0 )); do
 done
 
 case "$url" in
-  https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.2/install.sh)
+  https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.3/install.sh)
     /bin/cat "$FAKE_BOOTSTRAP"
     ;;
-  https://github.com/DriftlessWriting/Driftless-NoMore404/archive/refs/tags/v1.2.2.tar.gz)
+  https://github.com/DriftlessWriting/Driftless-NoMore404/archive/refs/tags/v1.2.3.tar.gz)
     [[ -n "$output_path" ]]
     cp -- "$FAKE_RELEASE_ARCHIVE" "$output_path"
     ;;
@@ -223,7 +223,7 @@ runner="$test_directory/run-public-command"
 cat >"$runner" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.2/install.sh | bash'
+bash -o pipefail -c 'curl --proto =https --tlsv1.2 --fail --silent --show-error --location https://raw.githubusercontent.com/DriftlessWriting/Driftless-NoMore404/v1.2.3/install.sh | bash'
 EOF
 
 chmod 0755 \
@@ -275,9 +275,9 @@ grep -Fq 'Automatic Hermes Desktop integration is enabled.' \
   <<<"$one_command_output"
 grep -Fq 'Doctor finished with 0 failure(s) and 0 warning(s).' \
   <<<"$one_command_output"
-grep -Fq 'Ready. Open Hermes Desktop, choose Refresh models' \
+grep -Fq 'Ready. Open Hermes Desktop, choose Refresh models, and select your model under NoMore404 Local.' \
   <<<"$one_command_output"
-grep -Fq 'Bootstrap completed from the v1.2.2 source release.' \
+grep -Fq 'Bootstrap completed from the v1.2.3 source release.' \
   <<<"$one_command_output"
 
 runtime_file="$test_home/.config/no-more-404/runtime.env"

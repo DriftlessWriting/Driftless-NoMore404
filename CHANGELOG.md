@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.3 - 2026-09-10
+
+- Put the complete one-command path at the beginning of both the README and
+  Quickstart for people who do not have an AI helper or Linux experience.
+- Documented that aliases registered under **NoMore404 Local** appear in
+  Hermes Desktop's normal model selector automatically, with **Refresh models**
+  needed only when Hermes already has an older catalog open or cached.
+- Made the installer's final success message name the exact Hermes provider in
+  which the selected model appears.
+
 ## 1.2.2 - 2026-09-10
 
 - Made the public one-command installer continue directly into first-time
