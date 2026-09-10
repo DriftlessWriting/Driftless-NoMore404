@@ -24,7 +24,11 @@ need to be a Nous Hermes model.
 flowchart LR
     Operator[Operator] --> CLI[no-more-404 CLI]
     CLI --> Target[systemd user target]
-    User[User starts Hermes] --> Adapter[optional Hermes session adapter]
+    CLI -.->|explicit enable or setup approval| Follower[Hermes Desktop follower]
+    User[User starts Hermes] --> Hermes
+    Follower -.->|observes same-user main process| Hermes
+    Follower --> Target
+    User -.->|advanced custom launcher| Adapter[foreground session adapter]
     Adapter --> Target
     Adapter --> Hermes
     CLI -.->|explicit register-hermes via Hermes CLI| HermesConfig[Hermes user configuration]
@@ -72,7 +76,7 @@ endpoint. It can:
 - start or restart the target, verify the managed service owns the configured
   listening port, and wait for `/health`;
 - stop the target;
-- show systemd status or follow router and watchdog logs;
+- show systemd status or follow router, watchdog, and Desktop-follower logs;
 - auto-discover or explicitly download a compatible pinned llama.cpp runtime;
 - project one user-selected model's memory fit without allocating its tensors
   when a compatible `llama-fit-params` companion is present, then temporarily
@@ -81,6 +85,8 @@ endpoint. It can:
   context;
 - explicitly register configured model aliases with Hermes's model picker
   without selecting one;
+- enable or disable automatic Hermes Desktop session following without editing
+  a Hermes file or launcher;
 - validate configuration with `doctor`; and
 - run a foreground child command while ensuring the target is available.
 
@@ -116,6 +122,33 @@ device placement against free memory on later loads. A successful projection
 does not reserve memory; the real load remains authoritative and may still fail
 if availability changes.
 
+### `no-more-404-hermes-follower.service`
+
+Guided setup offers this automatic integration as a separate explicit choice.
+When approved, the CLI enables one lightweight user service at login. The
+service itself does not start Hermes, load a model, or reserve VRAM. It observes
+same-user Linux process metadata and waits for the ordinary native Hermes
+Electron main process, named `Hermes` or `hermes` without a helper `--type=`
+role.
+
+When Hermes appears and the target is inactive, the follower acquires the same
+private lifecycle lock used by other owning operations, refuses an occupied
+configured port, starts the target, and waits for `/health`. It retains the lock
+while it owns that target. After the last Hermes main process is absent for two
+checks, it stops only the target it started and releases the lock. A target
+that was active before Hermes appeared is preserved.
+
+The follower does not inspect Hermes configuration, conversations, prompts, or
+workspace files. It does not rewrite a desktop entry, so a normal Hermes update
+cannot remove the integration. A custom renamed Electron executable is not
+matched; that conservative limit avoids broad process guessing. The advanced
+foreground adapter below remains available for such installations.
+
+Startup failures are written to the user journal and retried while Hermes is
+open. When the optional `notify-send` command exists, one best-effort local
+desktop notice is emitted per affected Hermes session. No remote notification
+or telemetry is sent.
+
 ### `no-more-404-hermes-session` adapter
 
 The optional adapter is invoked by a user-controlled Hermes Desktop launcher;
@@ -125,14 +158,16 @@ needed, launches the requested Hermes executable, and stops the target on exit
 only when it owned that start. Hermes arguments and environment are inherited
 unchanged. It uses the CLI's private lifecycle lock while it owns the runtime,
 preventing a simultaneous persistent start from being mistaken for the
-session-owned start. The installer copies the adapter but does not configure
-or invoke it. See [Hermes Desktop integration](HERMES_DESKTOP.md).
+session-owned start. It is the advanced path for a renamed or otherwise custom
+Desktop executable. The installer copies the adapter but does not configure or
+invoke it. See [Hermes Desktop integration](HERMES_DESKTOP.md).
 
 ### `no-more-404.target`
 
 The target groups the runtime under a single start/stop boundary. It wants the
 router service but is not enabled by the installer. The runtime therefore starts
-only after an explicit CLI or systemd request.
+only after an explicit CLI/systemd request or a user-approved Hermes lifecycle
+helper observes its session.
 
 ### `no-more-404-router.service`
 
@@ -210,6 +245,7 @@ The normal installed locations are:
 | --- | --- |
 | CLI | `~/.local/bin/no-more-404` |
 | Router wrapper | `~/.local/libexec/no-more-404/no-more-404-router` |
+| Desktop follower | `~/.local/libexec/no-more-404/no-more-404-hermes-follower` |
 | Runtime configuration | `~/.config/no-more-404/runtime.env` |
 | Model preset | `~/.config/no-more-404/models.ini` |
 | systemd user units | `~/.config/systemd/user/` |
@@ -237,6 +273,25 @@ any separate user edits.
 
 ## Lifecycle
 
+### Automatic Hermes Desktop session
+
+1. The user starts Hermes Desktop normally.
+2. The enabled lightweight follower recognises its same-user Electron main
+   process; it never launches Hermes.
+3. If the runtime target is inactive and its port is free, the follower takes
+   the lifecycle lock and starts the target.
+4. The follower waits for the router's `/health` endpoint. Hermes remains an
+   independently owned process throughout.
+5. llama.cpp loads the chosen model only when Hermes requests its alias and may
+   unload it after the configured idle interval.
+6. After the last Hermes main process closes, the follower stops only a target
+   it owned. A separately started target remains active.
+
+The observer normally notices either transition within one second and requires
+two absent checks before cleanup. It stays enabled in the user's systemd
+session only after explicit setup approval, consuming no model memory while it
+waits.
+
 ### Start
 
 1. The operator runs `no-more-404 start`.
@@ -263,9 +318,18 @@ Loading latency and memory use belong to the upstream server, model, and local
 hardware. Context is fixed at the value proven during setup while llama.cpp is
 free to recompute device placement from currently available memory.
 
-The default preset permits one resident model. Requesting another alias may
-therefore require llama.cpp to evict or stop the current model according to its
-own multi-model behavior.
+NoMore404 enforces one resident-model slot and enables llama.cpp autoloading.
+When Hermes first sends a request for a different picker alias, the pinned
+llama.cpp router does not evict a model that is serving work. It queues the new
+request, waits until the existing worker is no longer busy, unloads that worker,
+loads the requested model, and routes the queued request. NoMore404 does not
+manually kill a worker or track llama.cpp's changing child ports.
+
+Each model is fitted independently by `setup` or `add-model`; its proven
+context is stored in its preset section and registered as that alias's Hermes
+context. Adding an alias does not preload it. Hermes remains responsible for
+the user's selection, while the router is responsible only for carrying out
+the resulting request safely.
 
 ### Idle
 
@@ -304,6 +368,13 @@ releases the lock and preserves the target on exit. This prevents a concurrent
 manual `start` from returning success for a target the adapter later treats as
 session-owned.
 
+The automatic follower applies the same ownership rule. It holds the lock only
+when it started the target. If another lifecycle operation owns the lock, it
+waits rather than competing; if the target was already active, it observes but
+does not claim it. While Hermes remains open, stopping a follower-owned target
+causes the follower to restore it. Disable automatic following first when the
+operator wants the runtime to remain off while Hermes stays open.
+
 ## Recovery semantics
 
 The current release combines bounded process-exit recovery with a bounded HTTP
@@ -320,6 +391,10 @@ producing useful model responses.
 | Foreground child exits after `run` started the target | CLI stops the target it owned |
 | Foreground child exits after a separate `start` | target stays active; model can idle-unload |
 | `start` or `restart` races an active `run` session | command is rejected before changing the target |
+| User starts native Hermes Desktop with automatic following enabled | follower starts the target, waits for health, and owns it for that Desktop session |
+| Hermes Desktop closes after the follower started the target | follower stops its owned target after the close debounce |
+| Hermes Desktop opens while a separately started target is active | follower preserves that target and does not stop it later |
+| Hermes uses a custom renamed executable | automatic detection does not guess; use the explicit adapter |
 | Server process is alive but `/health` is unresponsive | watchdog restarts the target after the configured consecutive failures |
 | A request or model worker wedges and `/health` also stalls | watchdog restarts the target after the configured consecutive failures |
 | A request wedges while `/health` still answers | operator uses the explicit restart command |
@@ -363,6 +438,12 @@ Only absolute executable, preset, and cache paths are accepted where the
 wrapper controls them. This prevents working-directory ambiguity but does not
 establish artifact trust. Operators should pin sources and verify checksums.
 
+The automatic Desktop follower reads only current-user process ownership,
+process names, first command arguments, and Electron role arguments under the
+Linux process filesystem. It uses those fields solely to identify the native
+Hermes main process. Its optional local notification contains no model name,
+path, prompt, or conversation content.
+
 ### Data
 
 Prompts and generated content travel directly between Hermes and the local
@@ -393,16 +474,20 @@ naming details.
 - Hermes Desktop has its own Local Models manager. NoMore404 is an independent
   alternative for user-selected GGUFs, and simultaneous ownership of the same
   llama.cpp process or model load is unsupported.
-- No automatic Hermes installation, startup, model selection, or upgrade.
-  Picker registration is an explicit setup choice or command and is limited to
-  the `providers.no-more-404` entry.
+- No automatic Hermes installation, startup, model choice, or upgrade.
+  The optional follower reacts only after the user starts native Hermes
+  Desktop. Picker registration is an explicit setup choice or command and is
+  limited to the `providers.no-more-404` entry.
 - No model downloader or automatic llama.cpp updater. Only an explicit,
   checksum-pinned initial runtime download is supported.
 - Setup selects a free loopback port from a bounded range; later port conflicts
   remain visible errors rather than triggering an unbounded search.
 - No authentication beyond the enforced local bind boundary.
-- No proactive desktop or remote failure notifications; failures are exposed
-  through command results, `doctor`, systemd status, and local journal logs.
+- The automatic follower recognises native Electron executables named `Hermes`
+  or `hermes`; deliberately renamed custom builds require the explicit adapter.
+- No remote failure notifications. Automatic-follow startup failure has a
+  best-effort local `notify-send` notice when available; all details remain in
+  command results, `doctor`, systemd status, and local journal logs.
 - Hardware sizing is projected by llama.cpp without tensor allocation when its
   companion tool is available and confirmed by one temporary model load. It is
   not a reservation or a guarantee against later memory contention or every

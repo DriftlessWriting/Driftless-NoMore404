@@ -17,6 +17,10 @@ set -Eeuo pipefail
 printf '%s\n' "$*" >>"$FAKE_SYSTEMCTL_LOG"
 case "${1:-}" in
   show-environment | daemon-reload) exit 0 ;;
+  disable)
+    [[ "${FAKE_DISABLE_FAIL:-false}" == true ]] && exit 1
+    exit 0
+    ;;
   stop)
     [[ "${FAKE_STOP_FAIL:-false}" == true ]] && exit 1
     exit 0
@@ -65,16 +69,18 @@ managed_paths=(
   "$safe_home/.local/libexec/no-more-404/no-more-404-router"
   "$safe_home/.local/libexec/no-more-404/no-more-404-health"
   "$safe_home/.local/libexec/no-more-404/no-more-404-hermes-session"
+  "$safe_home/.local/libexec/no-more-404/no-more-404-hermes-follower"
   "$safe_home/.config/systemd/user/no-more-404.target"
   "$safe_home/.config/systemd/user/no-more-404-router.service"
   "$safe_home/.config/systemd/user/no-more-404-watch.service"
   "$safe_home/.config/systemd/user/no-more-404-watch.timer"
+  "$safe_home/.config/systemd/user/no-more-404-hermes-follower.service"
 )
 for managed_path in "${managed_paths[@]}"; do
   [[ -f "$managed_path" ]]
 done
 manifest="$safe_home/.local/state/no-more-404/install-manifest.tsv"
-[[ "$(wc -l <"$manifest")" == 8 ]]
+[[ "$(wc -l <"$manifest")" == 10 ]]
 if grep -Eq '^(start|restart|enable)( |$)' "$systemctl_log"; then
   printf 'installer started or enabled a service\n' >&2
   exit 1

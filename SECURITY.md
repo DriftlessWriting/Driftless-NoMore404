@@ -76,6 +76,15 @@ privileges. Piping any network response into a shell still depends on the
 integrity of the GitHub account, release tag, TLS connection, and local
 machine, so the README also provides an inspect-before-running path.
 
+Guided setup separately asks whether to enable automatic Hermes Desktop
+following. If approved, it enables a lightweight user service which waits for
+a same-user native Hermes Electron main process. The follower never launches
+or modifies Hermes, loads no model itself, and stops only a runtime target it
+started. It reads only process ownership, process name, first command argument,
+and Electron `--type=` role metadata; it does not read Hermes configuration,
+conversations, prompts, or workspace files. Its optional `notify-send` failure
+notice contains no machine path, model name, or user content.
+
 The optional llama.cpp runtime installer uses fixed official GitHub release
 URLs and hard-coded SHA-256 digests recorded in `vendor/llama.cpp.lock`. It
 extracts only an archive with the expected top-level directory, rejects links
@@ -98,7 +107,7 @@ does not count swap, and requires explicit confirmation before an obviously
 oversized load. Neither method reserves memory or guarantees a later load;
 concurrent workloads and backend defects can still cause allocation failure.
 
-The optional Hermes Desktop session adapter accepts an Electron
+The advanced Hermes Desktop session adapter accepts an Electron
 `chrome-sandbox` helper only when it is an explicitly configured absolute,
 non-symlink path to a regular file owned by `root:root` with mode `4755`. Never
 make a downloaded or user-owned helper set-user-ID root to satisfy this check;

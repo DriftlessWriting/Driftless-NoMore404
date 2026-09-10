@@ -67,6 +67,23 @@ if grep -Fxq -- --slots "$capture_file"; then
   exit 1
 fi
 
+# One resident model is a package invariant: it is what makes a request for a
+# different picker alias wait for, then replace, the previous model.
+set +e
+ARG_CAPTURE="$capture_file" \
+LLAMA_SERVER_BIN="$fake_server" \
+MODELS_PRESET="$preset_file" \
+LLAMA_CACHE_DIR="$test_dir/cache" \
+PORT=15598 \
+MAX_MODELS=2 \
+  "$repo_root/bin/no-more-404-router" >/dev/null 2>&1
+multiple_resident_status=$?
+set -e
+[[ "$multiple_resident_status" == 78 ]] || {
+  printf 'MAX_MODELS other than one was not rejected with EX_CONFIG\n' >&2
+  exit 1
+}
+
 # Operators can explicitly opt in to the loopback-only slots endpoint.
 ARG_CAPTURE="$capture_file" \
 LLAMA_SERVER_BIN="$fake_server" \

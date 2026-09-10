@@ -56,6 +56,8 @@ esac
 require_positive_integer PORT "$PORT"
 (( PORT >= 1024 && PORT <= 65535 )) || fail "$EX_CONFIG" "PORT must be between 1024 and 65535"
 require_positive_integer MAX_MODELS "$MAX_MODELS"
+(( MAX_MODELS == 1 )) ||
+  fail "$EX_CONFIG" "MAX_MODELS must be 1 so a new model waits for and replaces the previous resident model"
 require_positive_integer IDLE_SECONDS "$IDLE_SECONDS"
 require_positive_integer REQUEST_TIMEOUT_SECONDS "$REQUEST_TIMEOUT_SECONDS"
 
@@ -66,7 +68,11 @@ case "$ENABLE_SLOTS" in true | false) ;; *) fail "$EX_CONFIG" "ENABLE_SLOTS must
 install -d -m 0700 "$LLAMA_CACHE_DIR"
 export LLAMA_CACHE="$LLAMA_CACHE_DIR"
 
-if grep -Eiq '(@MODEL_DIR@|/absolute/path/to)' "$MODELS_PRESET"; then
+if awk '
+  /^[[:space:]]*[#;]/ { next }
+  /@MODEL_DIR@|\/absolute\/path\/to/ { found = 1 }
+  END { exit found ? 0 : 1 }
+' "$MODELS_PRESET"; then
   fail "$EX_CONFIG" "MODELS_PRESET still contains example placeholders"
 fi
 

@@ -96,7 +96,7 @@ cli="$repo_root/bin/no-more-404"
 
 "$cli" logs
 grep -Fxq -- \
-  '--user --unit no-more-404-router.service --unit no-more-404-watch.service --follow' \
+  '--user --unit no-more-404-router.service --unit no-more-404-watch.service --unit no-more-404-hermes-follower.service --follow' \
   "$journalctl_log"
 
 "$cli" start >/dev/null

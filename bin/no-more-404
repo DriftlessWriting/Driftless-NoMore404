@@ -7,6 +7,7 @@ readonly TARGET_UNIT=no-more-404.target
 readonly ROUTER_UNIT=no-more-404-router.service
 readonly WATCH_SERVICE_UNIT=no-more-404-watch.service
 readonly WATCH_TIMER_UNIT=no-more-404-watch.timer
+readonly HERMES_FOLLOWER_UNIT=no-more-404-hermes-follower.service
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/no-more-404"
 readonly CONFIG_FILE="$CONFIG_DIR/runtime.env"
 readonly MODEL_FILE="$CONFIG_DIR/models.ini"
@@ -45,8 +46,13 @@ Commands:
   status                Show target and router service status.
   logs                  Follow router and watchdog logs.
   setup                 Auto-fit one chosen model and configure it safely.
+  add-model             Auto-fit and add another user-chosen model.
   install-runtime       Install the verified pinned llama.cpp Linux runtime.
   register-hermes       Add configured models to the Hermes model picker.
+  integrate-hermes-desktop
+                        Automatically follow user-started Hermes Desktop sessions.
+  remove-hermes-desktop-integration
+                        Disable automatic Hermes Desktop session following.
   doctor                Validate configuration without loading a model.
   endpoint              Print the configured OpenAI-compatible base URL.
   run -- COMMAND ...    Run a foreground command while the router is available.
@@ -761,8 +767,9 @@ setup_configuration() {
   grep -Fq '/absolute/path/to/main-model.gguf' "$MODEL_FILE" ||
     fail "model preset already appears customised; setup will not overwrite it"
 
-  printf 'NoMore404 initial setup. No persistent service or Hermes process will be started.\n'
+  printf 'NoMore404 initial setup. The model test will not start a persistent service or Hermes.\n'
   printf 'A temporary local model test will run, then release its RAM and VRAM.\n'
+  printf 'After configuration, setup will separately ask about the Hermes picker and automatic Desktop following.\n'
   detected_binary="$(command -v llama-server 2>/dev/null || true)"
   while true; do
     if [[ -n "$detected_binary" ]]; then
@@ -809,11 +816,10 @@ setup_configuration() {
     printf 'That is not a readable, non-empty model file. Try again.\n' >&2
   done
 
-  printf 'Model name [local-main]: '
+  printf 'Picker name [local-main] (ordinary spaces are allowed): '
   IFS= read -r model_name || fail "setup ended before the model name was confirmed"
-  model_name="${model_name:-local-main}"
-  [[ "$model_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
-    fail "model name may contain only letters, numbers, dots, underscores, and hyphens"
+  model_name="$(trim_whitespace "${model_name:-local-main}")"
+  validate_model_alias "$model_name"
 
   for setup_path in "$binary_path" "$model_path" "$MODEL_FILE"; do
     [[ "$setup_path" != *\\* && "$setup_path" != *\"* ]] ||
@@ -874,8 +880,10 @@ setup_configuration() {
 
   printf '\nConfiguration saved without starting the runtime.\n'
   offer_hermes_registration
+  offer_hermes_desktop_integration
   printf '\n'
   printf 'Next, run: %s doctor\n' "$0"
+  printf 'To fit and add another chosen GGUF later, run: %s add-model\n' "$0"
 }
 
 trim_whitespace() {
@@ -883,6 +891,14 @@ trim_whitespace() {
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
   printf '%s' "$value"
+}
+
+active_configuration_has_placeholder() {
+  awk '
+    /^[[:space:]]*[#;]/ { next }
+    /@MODEL_DIR@|\/absolute\/path\/to/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$@"
 }
 
 config_value() {
@@ -1001,6 +1017,41 @@ model_catalog_rows() {
         printf "%s\t%s\n", name, context
       }
     }
+  ' "$preset_path"
+}
+
+validate_model_alias() {
+  local model_name="$1"
+  local safe_pattern='^[A-Za-z0-9][A-Za-z0-9._ -]*$'
+
+  [[ ${#model_name} -le 80 && "$model_name" =~ $safe_pattern &&
+    "$model_name" != *' ' ]] ||
+    fail "model name must be 1-80 characters, start with a letter or number, and use only letters, numbers, spaces, dots, underscores, and hyphens"
+}
+
+model_alias_exists() {
+  local wanted_alias="$1"
+  local preset_path="${2:-$MODEL_FILE}"
+
+  awk -v wanted="$wanted_alias" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      stripped = trim(line)
+      if (stripped ~ /^\[[^]]+\][[:space:]]*([#;].*)?$/) {
+        sub(/^\[/, "", stripped)
+        sub(/\][[:space:]]*([#;].*)?$/, "", stripped)
+        if (trim(stripped) == wanted) {
+          found = 1
+        }
+      }
+    }
+    END { exit found ? 0 : 1 }
   ' "$preset_path"
 }
 
@@ -1126,8 +1177,7 @@ register_hermes_models() {
   # a 64K window for its system prompt, tools, and working conversation.
   for row in "${model_rows[@]}"; do
     IFS=$'\t' read -r model_name model_context <<<"$row"
-    [[ "$model_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
-      fail "model preset [$model_name] uses an unsafe alias; use only letters, numbers, dots, underscores, and hyphens"
+    validate_model_alias "$model_name"
     [[ "$model_context" =~ ^[0-9]+$ ]] ||
       fail "model preset [$model_name] needs an explicit numeric ctx-size"
     (( model_context >= HERMES_MIN_CONTEXT_LENGTH )) ||
@@ -1197,7 +1247,7 @@ offer_hermes_registration() {
     return
   fi
 
-  printf "Add the configured model to Hermes Desktop's picker without changing the current model? [Y/n]: "
+  printf "Add or refresh the configured models in Hermes Desktop's picker without changing the current model? [Y/n]: "
   if ! IFS= read -r answer; then
     printf '\nNo answer received; Hermes was not changed. Run: %s register-hermes\n' "$0"
     return
@@ -1207,6 +1257,175 @@ offer_hermes_registration() {
     '' | y | yes) register_hermes_models ;;
     n | no) printf 'Hermes was not changed. Run later: %s register-hermes\n' "$0" ;;
     *) printf 'Answer not recognised; Hermes was not changed. Run later: %s register-hermes\n' "$0" ;;
+  esac
+}
+
+add_model() {
+  local binary_path preset_path model_input model_path model_name setup_path
+  local configured_port missing_flags model_temporary row added_row=false
+
+  require_user_systemd
+  require_command grep
+  require_command mktemp
+  require_command realpath
+  require_command curl
+  require_command ss
+  require_command stat
+  require_command timeout
+
+  [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] ||
+    fail "add-model requires the regular installed configuration file: $CONFIG_FILE"
+  [[ -f "$MODEL_FILE" && ! -L "$MODEL_FILE" ]] ||
+    fail "add-model requires the regular installed model preset: $MODEL_FILE"
+
+  preset_path="$(config_value MODELS_PRESET '')"
+  [[ "$preset_path" == "$MODEL_FILE" ]] ||
+    fail "add-model manages the installed preset at $MODEL_FILE; set MODELS_PRESET to that path or edit your custom preset manually"
+  binary_path="$(config_value LLAMA_SERVER_BIN '')"
+  [[ "$binary_path" == /* && -f "$binary_path" && -x "$binary_path" ]] ||
+    fail "LLAMA_SERVER_BIN must name an executable absolute path; finish initial setup first"
+  missing_flags="$(llama_server_missing_setup_flags "$binary_path")"
+  [[ -z "$missing_flags" ]] ||
+    fail "the configured llama-server is missing required feature(s): $missing_flags"
+  active_configuration_has_placeholder "$CONFIG_FILE" "$MODEL_FILE" &&
+    fail "finish initial setup before adding another model"
+
+  if systemctl --user is-active --quiet "$TARGET_UNIT"; then
+    fail "close Hermes Desktop or stop NoMore404 before testing another model; the active runtime was not changed"
+  fi
+
+  while true; do
+    printf 'Path to another GGUF model file: '
+    IFS= read -r model_input || fail "add-model ended before a model path was entered"
+    if [[ "$model_input" == \~/* ]]; then
+      model_input="$HOME/${model_input:2}"
+    fi
+    model_path="$(realpath -e -- "$model_input" 2>/dev/null || true)"
+    if [[ -f "$model_path" && -r "$model_path" && -s "$model_path" ]]; then
+      break
+    fi
+    printf 'That is not a readable, non-empty model file. Try again.\n' >&2
+  done
+
+  printf 'Picker name for this model: '
+  IFS= read -r model_name || fail "add-model ended before the model name was entered"
+  model_name="$(trim_whitespace "$model_name")"
+  validate_model_alias "$model_name"
+  model_alias_exists "$model_name" "$MODEL_FILE" &&
+    fail "model name '$model_name' is already configured; the existing entry was not changed"
+
+  for setup_path in "$binary_path" "$model_path" "$MODEL_FILE"; do
+    [[ "$setup_path" != *\\* && "$setup_path" != *\"* ]] ||
+      fail "add-model cannot safely write a path containing a backslash or double quote"
+  done
+
+  configured_port="$(config_value PORT 55984)"
+  acquire_session_lock \
+    "another lifecycle operation or Hermes session is active; close Hermes Desktop and try add-model again"
+  if systemctl --user is-active --quiet "$TARGET_UNIT"; then
+    fail "NoMore404 became active before the model test; the configured models were not changed"
+  fi
+
+  trap cleanup_setup_artifacts EXIT
+  run_model_probe "$binary_path" "$model_path" "$model_name" "$configured_port" ||
+    fail "the configured models were not changed because the selected model did not pass its local test"
+
+  model_temporary="$(mktemp "$CONFIG_DIR/.models.ini.add.XXXXXX")"
+  setup_temporary_files+=("$model_temporary")
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    printf '%s\n' "$row"
+  done <"$MODEL_FILE" >"$model_temporary"
+  cat >>"$model_temporary" <<EOF
+
+[$model_name]
+ctx-size = $setup_effective_context
+model = $model_path
+load-on-startup = false
+stop-timeout = 90
+EOF
+
+  while IFS= read -r row; do
+    if [[ "$row" == "$model_name"$'\t'"$setup_effective_context" ]]; then
+      added_row=true
+      break
+    fi
+  done < <(model_catalog_rows "$model_temporary")
+  [[ "$added_row" == true ]] ||
+    fail "could not validate the new model entry before saving it"
+  chmod 0600 "$model_temporary"
+  mv -f -- "$model_temporary" "$MODEL_FILE"
+  cleanup_setup_artifacts
+  trap - EXIT
+
+  printf '\nAdded "%s" with the %s-token context proven on this hardware.\n' \
+    "$model_name" "$setup_effective_context"
+  offer_hermes_registration
+  printf 'In Hermes Desktop, choose Refresh models. Selecting this alias will switch on its first request.\n'
+}
+
+validate_hermes_desktop_integration_prerequisites() {
+  local binary preset
+
+  [[ -f "$UNIT_DIR/$HERMES_FOLLOWER_UNIT" &&
+    ! -L "$UNIT_DIR/$HERMES_FOLLOWER_UNIT" ]] ||
+    fail "Hermes Desktop follower unit is not installed: $UNIT_DIR/$HERMES_FOLLOWER_UNIT"
+  [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] ||
+    fail "runtime configuration is missing or unsafe: $CONFIG_FILE"
+  binary="$(config_value LLAMA_SERVER_BIN '')"
+  preset="$(config_value MODELS_PRESET '')"
+  [[ "$binary" == /* && -f "$binary" && -x "$binary" ]] ||
+    fail "configure an executable llama-server before enabling Hermes Desktop integration"
+  [[ "$preset" == /* && -f "$preset" && -r "$preset" ]] ||
+    fail "configure a readable absolute model preset before enabling Hermes Desktop integration"
+  if active_configuration_has_placeholder "$CONFIG_FILE" "$preset"; then
+    fail "finish 'no-more-404 setup' before enabling Hermes Desktop integration"
+  fi
+}
+
+integrate_hermes_desktop() {
+  require_user_systemd
+  validate_hermes_desktop_integration_prerequisites
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$HERMES_FOLLOWER_UNIT" ||
+    fail "could not enable the Hermes Desktop session follower"
+  systemctl --user is-enabled --quiet "$HERMES_FOLLOWER_UNIT" ||
+    fail "Hermes Desktop session follower did not remain enabled"
+  systemctl --user is-active --quiet "$HERMES_FOLLOWER_UNIT" || {
+    systemctl --user status --no-pager "$HERMES_FOLLOWER_UNIT" >&2 || true
+    fail "Hermes Desktop session follower did not remain active"
+  }
+
+  printf 'Automatic Hermes Desktop integration is enabled.\n'
+  printf 'NoMore404 will follow user-started Hermes Desktop sessions; it will never start Hermes itself.\n'
+}
+
+remove_hermes_desktop_integration() {
+  require_user_systemd
+  systemctl --user disable --now "$HERMES_FOLLOWER_UNIT" ||
+    fail "could not disable the Hermes Desktop session follower"
+  if systemctl --user is-active --quiet "$HERMES_FOLLOWER_UNIT"; then
+    fail "Hermes Desktop session follower is still active"
+  fi
+  printf 'Automatic Hermes Desktop integration is disabled.\n'
+}
+
+offer_hermes_desktop_integration() {
+  local answer
+
+  printf 'Automatically start NoMore404 when Hermes Desktop opens and stop it when Hermes closes? [Y/n]: '
+  if ! IFS= read -r answer; then
+    printf '\nNo answer received; automatic Desktop integration was not enabled. Run: %s integrate-hermes-desktop\n' "$0"
+    return
+  fi
+
+  case "${answer,,}" in
+    '' | y | yes) integrate_hermes_desktop ;;
+    n | no)
+      printf 'Automatic Desktop integration was not enabled. Run later: %s integrate-hermes-desktop\n' "$0"
+      ;;
+    *)
+      printf 'Answer not recognised; automatic Desktop integration was not enabled. Run later: %s integrate-hermes-desktop\n' "$0"
+      ;;
   esac
 }
 
@@ -1313,6 +1532,7 @@ stop_target_after_failure() {
 doctor() {
   local failures=0 warnings=0 binary preset host port mode help_output
   local setting setting_value cache_dir target_enablement target_active=false
+  local follower_enablement
   local metrics_enabled slots_enabled
   local model_path model_path_count=0 invalid_model_path_count=0
   local model_row model_name model_context model_context_count=0
@@ -1356,7 +1576,8 @@ doctor() {
     "$UNIT_DIR/$TARGET_UNIT" \
     "$UNIT_DIR/$ROUTER_UNIT" \
     "$UNIT_DIR/$WATCH_SERVICE_UNIT" \
-    "$UNIT_DIR/$WATCH_TIMER_UNIT"; do
+    "$UNIT_DIR/$WATCH_TIMER_UNIT" \
+    "$UNIT_DIR/$HERMES_FOLLOWER_UNIT"; do
     if [[ -f "$unit_path" ]]; then
       check_ok "installed unit $(basename "$unit_path")"
     else
@@ -1369,9 +1590,15 @@ doctor() {
   host="$(config_value BIND_HOST 127.0.0.1)"
   port="$(config_value PORT 55984)"
 
-  for setting in MAX_MODELS IDLE_SECONDS REQUEST_TIMEOUT_SECONDS ROUTER_START_TIMEOUT_SECONDS; do
+  setting_value="$(config_value MAX_MODELS 1)"
+  if [[ "$setting_value" == 1 ]]; then
+    check_ok "MAX_MODELS is one, so model changes use one safe replacement slot"
+  else
+    check_fail "MAX_MODELS must be exactly one so the previous model is replaced during a switch"
+  fi
+
+  for setting in IDLE_SECONDS REQUEST_TIMEOUT_SECONDS ROUTER_START_TIMEOUT_SECONDS; do
     case "$setting" in
-      MAX_MODELS) setting_value="$(config_value "$setting" 1)" ;;
       IDLE_SECONDS) setting_value="$(config_value "$setting" 60)" ;;
       REQUEST_TIMEOUT_SECONDS) setting_value="$(config_value "$setting" 1800)" ;;
       ROUTER_START_TIMEOUT_SECONDS) setting_value="$(config_value "$setting" 20)" ;;
@@ -1459,7 +1686,7 @@ doctor() {
     else
       check_warn "model preset mode is ${mode:-unknown}; 0600 is recommended"
     fi
-    grep -Eiq '(@MODEL_DIR@|/absolute/path/to)' "$preset" &&
+    active_configuration_has_placeholder "$preset" &&
       check_fail "model preset still contains example placeholders"
     grep -Eiq '^[[:space:]]*load-on-startup[[:space:]]*=[[:space:]]*true([[:space:]]*|$)' "$preset" &&
       check_fail "model preset enables startup preloading"
@@ -1550,6 +1777,19 @@ doctor() {
     disabled | static) check_ok "runtime target is not enabled at login" ;;
     enabled) check_fail "runtime target is enabled; installation must remain on-demand" ;;
     *) check_warn "runtime target enablement is ${target_enablement:-unknown}" ;;
+  esac
+
+  follower_enablement="$(systemctl --user is-enabled "$HERMES_FOLLOWER_UNIT" 2>/dev/null || true)"
+  case "$follower_enablement" in
+    enabled)
+      if systemctl --user is-active --quiet "$HERMES_FOLLOWER_UNIT" 2>/dev/null; then
+        check_ok "automatic Hermes Desktop session following is enabled and active"
+      else
+        check_fail "automatic Hermes Desktop session following is enabled but inactive"
+      fi
+      ;;
+    disabled) check_ok "automatic Hermes Desktop session following is disabled by user choice" ;;
+    *) check_warn "Hermes Desktop follower enablement is ${follower_enablement:-unknown}" ;;
   esac
 
   if systemctl --user is-active --quiet "$TARGET_UNIT" 2>/dev/null; then
@@ -1696,18 +1936,24 @@ case "$command_name" in
   restart) restart_runtime ;;
   status)
     require_user_systemd
-    systemctl --user status --no-pager "$TARGET_UNIT" "$ROUTER_UNIT"
+    systemctl --user status --no-pager \
+      "$TARGET_UNIT" "$ROUTER_UNIT" "$HERMES_FOLLOWER_UNIT"
     ;;
   logs)
     require_user_systemd
     exec journalctl --user \
       --unit "$ROUTER_UNIT" \
       --unit "$WATCH_SERVICE_UNIT" \
+      --unit "$HERMES_FOLLOWER_UNIT" \
       --follow
     ;;
   setup)
     (( $# == 0 )) || fail "setup does not accept arguments"
     setup_configuration
+    ;;
+  add-model)
+    (( $# == 0 )) || fail "add-model does not accept arguments"
+    add_model
     ;;
   install-runtime)
     (( $# == 0 )) || fail "install-runtime does not accept arguments"
@@ -1716,6 +1962,14 @@ case "$command_name" in
   register-hermes)
     (( $# == 0 )) || fail "register-hermes does not accept arguments"
     register_hermes_models
+    ;;
+  integrate-hermes-desktop)
+    (( $# == 0 )) || fail "integrate-hermes-desktop does not accept arguments"
+    integrate_hermes_desktop
+    ;;
+  remove-hermes-desktop-integration)
+    (( $# == 0 )) || fail "remove-hermes-desktop-integration does not accept arguments"
+    remove_hermes_desktop_integration
     ;;
   doctor) doctor ;;
   endpoint) endpoint_url; printf '\n' ;;

@@ -29,8 +29,22 @@ model, lets llama.cpp fit context and device placement with a 64K floor, runs
 one local chat token, and stops the process. It updates the two private files
 only after that test passes. If Hermes is installed, setup also offers to add
 the model alias and measured context to Hermes Desktop's picker; that separate
-step is optional and does not switch Hermes's current or default model. For
-manual or multi-model setup, edit:
+step is optional and does not switch Hermes's current or default model. Setup
+then offers to enable the lightweight automatic Desktop follower. When
+approved, it waits for user-started native Hermes sessions and owns the runtime
+only for their lifetime; it never starts or modifies Hermes.
+
+Add another user-selected GGUF without hand-editing the preset:
+
+```bash
+no-more-404 add-model
+```
+
+The command requires the managed runtime to be stopped, takes the lifecycle
+lock, repeats setup's projection, fit, context, and local-chat checks, and then
+atomically appends the new alias. It offers to refresh Hermes's provider after
+the model passes. A failure leaves the preset unchanged. For fully manual
+configuration, edit:
 
 ```text
 ~/.config/no-more-404/runtime.env
@@ -59,10 +73,12 @@ explicit user decision.
 no-more-404 doctor
 ```
 
-The doctor checks the systemd user manager, unit installation, private config
+The doctor checks the systemd user manager, unit installation, automatic
+Desktop-follower state, private config
 mode, llama-server feature and auto-fit flags, model preset, Hermes's 64K
-minimum context and fit floor, loopback binding, port, and—if already
-active—the health endpoint. It does not load a model.
+minimum context and fit floor, the required one-model replacement slot,
+loopback binding, port, and—if already active—the health endpoint. It does not
+load a model.
 
 ## Operate
 
@@ -99,16 +115,33 @@ no-more-404 register-hermes
 This explicit command uses Hermes's own configuration CLI and changes only
 `providers.no-more-404`; it does not change `model.default` or
 `model.provider`. Then choose **Refresh models** in Hermes Desktop and select
-the desired alias. Print the provider's local endpoint with:
+the desired alias. Hermes's first request for that alias is automatically
+routed through llama.cpp's one-model scheduler. If the current worker is busy,
+the new request waits; once safe, the old worker is unloaded and the requested
+model takes its place. No separate model-switch service polls or edits Hermes.
+Print the provider's local endpoint with:
 
 ```bash
 no-more-404 endpoint
 ```
 
-For Hermes Desktop, the optional session adapter can be called by an existing
-desktop entry so this target starts with the user-invoked Hermes process and
-stops when Hermes exits. It does not create or enable autostart. See
-[Hermes Desktop session integration](HERMES_DESKTOP.md).
+For Hermes Desktop, enable automatic following during setup or afterward:
+
+```bash
+no-more-404 integrate-hermes-desktop
+```
+
+The enabled follower watches only for a native same-user Hermes Electron main
+process. It does not edit a desktop entry or launch Hermes. It starts the
+target, waits for health, holds lifecycle ownership while Hermes is open, and
+stops only a target it started. Disable it with:
+
+```bash
+no-more-404 remove-hermes-desktop-integration
+```
+
+Custom renamed Desktop executables can use the advanced foreground adapter.
+See [Hermes Desktop integration](HERMES_DESKTOP.md).
 
 Hermes Desktop also has its own managed **Local Models** flow. Treat that and
 NoMore404 as alternative runtime owners: do not point both at the same
@@ -130,9 +163,11 @@ missing-input statuses that must not enter a restart loop. It closes the case
 where a live router stops answering its health endpoint. It does not detect one
 stuck generation while `/health` remains responsive. Restart performs its
 dependency, endpoint, timeout, ownership-lock, and port checks before asking
-systemd to disrupt the target. `no-more-404 logs` follows both router and
-watchdog messages. Failure reporting remains local; this package does not send
-desktop or remote notifications.
+systemd to disrupt the target. `no-more-404 logs` follows router, watchdog, and
+Desktop-follower messages. Failure reporting remains local. The follower uses
+one best-effort `notify-send` desktop notice per affected Hermes session when
+that optional command exists; this package sends no remote notification or
+telemetry.
 
 ## Uninstall
 
@@ -141,7 +176,8 @@ desktop or remote notifications.
 ./scripts/uninstall.sh
 ```
 
-Uninstall removes only package-managed files whose hashes still match the
+Uninstall first disables and stops the automatic Desktop follower, then stops
+the runtime. It removes only package-managed files whose hashes still match the
 install manifest. Locally modified installed files are preserved. User config,
 models, optional downloaded llama.cpp runtime, caches, state, and backups are
 always preserved. The separately owned Hermes provider entry is also

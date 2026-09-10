@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.2.1 - 2026-09-10
+
+- Made safe picker-driven model switching an enforced package contract:
+  `MAX_MODELS` must be exactly one, autoload remains mandatory, and the pinned
+  llama.cpp scheduler waits for a busy worker before replacing it with the
+  model requested by Hermes.
+- Added a guided `add-model` command. It independently projects and tests each
+  user-chosen GGUF, records its hardware-fitted context, atomically appends the
+  alias only after success, accepts readable picker names containing spaces,
+  and offers to refresh Hermes without choosing the user's model.
+- Added automatic Hermes Desktop lifecycle following as a guided-setup choice.
+  A lightweight systemd user service observes only the current user's native
+  Hermes Electron main process, never launches or modifies Hermes, starts the
+  NoMore404 target when Hermes opens, waits for router health, and stops only a
+  target it owns after Hermes closes.
+- Added `integrate-hermes-desktop` and
+  `remove-hermes-desktop-integration` commands so the integration is
+  repeatable, reversible, and requires no desktop-file editing.
+- Kept the foreground session adapter as an advanced fallback for deliberately
+  renamed or unusual Desktop builds. Normal Hermes updates cannot overwrite
+  the automatic integration because no Hermes launcher is replaced.
+- Reused the lifecycle ownership lock, added occupied-port protection and a
+  close debounce, ignored Electron helper processes, and preserved runtimes
+  that were active before Hermes opened.
+- Added local journal diagnostics and one optional, best-effort `notify-send`
+  notice when automatic startup fails; no remote notification or telemetry is
+  introduced.
+- Extended install, uninstall, doctor, status, logs, package validation,
+  systemd verification, security documentation, and synthetic lifecycle tests
+  for the new follower.
+- Removed a cyclic systemd timer ordering edge so the watchdog timer can be
+  activated reliably with the runtime target.
+
 ## 1.0.0 - 2026-09-08
 
 - Extracted the local-model lifecycle into an independent, machine-neutral

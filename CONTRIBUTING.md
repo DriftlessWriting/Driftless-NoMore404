@@ -15,7 +15,9 @@ Before proposing a change:
    scanners are installed.
 3. Confirm listeners remain loopback-only.
 4. Confirm installation does not start or enable services automatically.
-5. Explain any change to process ownership, restart behaviour, or file removal.
+5. Confirm automatic Desktop following is enabled only after an explicit setup
+   choice or command and never launches Hermes.
+6. Explain any change to process ownership, restart behaviour, or file removal.
 
 Do not paste private runtime logs into commits or issue trackers. Reduce a
 problem to a synthetic fixture first.

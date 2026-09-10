@@ -5,11 +5,13 @@ set -Eeuo pipefail
 bin_path="$HOME/.local/bin/no-more-404"
 health_path="$HOME/.local/libexec/no-more-404/no-more-404-health"
 hermes_session_path="$HOME/.local/libexec/no-more-404/no-more-404-hermes-session"
+hermes_follower_path="$HOME/.local/libexec/no-more-404/no-more-404-hermes-follower"
 libexec_path="$HOME/.local/libexec/no-more-404/no-more-404-router"
 target_path="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/no-more-404.target"
 service_path="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/no-more-404-router.service"
 watch_service_path="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/no-more-404-watch.service"
 watch_timer_path="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/no-more-404-watch.timer"
+hermes_follower_service_path="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/no-more-404-hermes-follower.service"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/no-more-404"
 manifest="$state_dir/install-manifest.tsv"
 dry_run=false
@@ -55,11 +57,13 @@ allowed_paths=(
   "$bin_path"
   "$health_path"
   "$hermes_session_path"
+  "$hermes_follower_path"
   "$libexec_path"
   "$target_path"
   "$service_path"
   "$watch_service_path"
   "$watch_timer_path"
+  "$hermes_follower_service_path"
 )
 
 [[ -f "$manifest" && ! -L "$manifest" ]] ||
@@ -91,6 +95,9 @@ while IFS=$'\t' read -r recorded_path recorded_hash extra ||
   manifest_entries=$((manifest_entries + 1))
 done <"$manifest"
 (( manifest_entries > 0 )) || fail "install manifest is empty; refusing to remove anything"
+
+run systemctl --user disable --now no-more-404-hermes-follower.service ||
+  fail "failed to disable the Hermes Desktop session follower; no files were removed"
 
 run systemctl --user stop no-more-404.target ||
   fail "failed to stop no-more-404.target; no files were removed"
